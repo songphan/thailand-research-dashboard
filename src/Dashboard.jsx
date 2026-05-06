@@ -14,7 +14,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // Set this to your email to enter the OpenAlex "polite pool" (100k req/day, far higher
 // per-second limits). Leave as empty string to remain anonymous (10 req/sec, you may see
 // 429 errors when many panels load at once). Either an institutional or personal address works.
-const OPENALEX_EMAIL = 'songphan@chula.ac.th';
+const OPENALEX_EMAIL = 'songphan.c@chula.ac.th';
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -102,20 +102,68 @@ const cleanLabel = (label, max = 38) => {
   return label.length > max ? label.slice(0, max - 1) + '…' : label;
 };
 
-const COUNTRIES = {
-  TH: 'Thailand', US: 'United States', CN: 'China', JP: 'Japan', GB: 'United Kingdom',
-  DE: 'Germany', AU: 'Australia', KR: 'South Korea', IN: 'India', FR: 'France',
-  CA: 'Canada', NL: 'Netherlands', IT: 'Italy', SG: 'Singapore', MY: 'Malaysia',
-  ID: 'Indonesia', VN: 'Vietnam', PH: 'Philippines', LA: 'Laos', KH: 'Cambodia',
-  MM: 'Myanmar', TW: 'Taiwan', HK: 'Hong Kong', CH: 'Switzerland', SE: 'Sweden',
-  ES: 'Spain', BE: 'Belgium', AT: 'Austria', DK: 'Denmark', NO: 'Norway',
-  FI: 'Finland', BR: 'Brazil', NZ: 'New Zealand', IE: 'Ireland', IL: 'Israel',
-  RU: 'Russia', PL: 'Poland', CZ: 'Czechia', PT: 'Portugal', GR: 'Greece',
-  TR: 'Türkiye', SA: 'Saudi Arabia', AE: 'UAE', EG: 'Egypt', ZA: 'South Africa',
-  PK: 'Pakistan', BD: 'Bangladesh', NP: 'Nepal', LK: 'Sri Lanka', MX: 'Mexico',
-  CL: 'Chile', AR: 'Argentina',
+// Country names. Intl.DisplayNames covers every ISO-3166-1 alpha-2 code with the
+// browser's localised display name, so we don't have to maintain a dictionary.
+// COUNTRY_OVERRIDES is for the handful of cases where we want a label different
+// from what the browser returns by default (shorter common names, etc.).
+const COUNTRY_OVERRIDES = {
+  GB: 'United Kingdom',
+  US: 'United States',
+  KR: 'South Korea',
+  KP: 'North Korea',
+  RU: 'Russia',
+  CZ: 'Czechia',
+  TR: 'Türkiye',
+  AE: 'United Arab Emirates',
+  TW: 'Taiwan',
+  HK: 'Hong Kong',
+  MO: 'Macao',
+  VN: 'Vietnam',
+  LA: 'Laos',
+  MM: 'Myanmar',
+  CD: 'DR Congo',
+  CG: 'Republic of Congo',
+  CI: "Côte d'Ivoire",
+  SY: 'Syria',
+  BO: 'Bolivia',
+  VE: 'Venezuela',
+  IR: 'Iran',
+  TZ: 'Tanzania',
+  MD: 'Moldova',
+  BN: 'Brunei',
+  PS: 'Palestine',
 };
-const countryName = (code) => COUNTRIES[code] || code;
+
+// Lazy-init a single DisplayNames instance. If the browser is too old or the
+// runtime doesn't support it, we fall back to the raw code.
+let _displayNames = null;
+const getDisplayNames = () => {
+  if (_displayNames !== null) return _displayNames;
+  try {
+    _displayNames = new Intl.DisplayNames(['en'], { type: 'region' });
+  } catch {
+    _displayNames = false;
+  }
+  return _displayNames;
+};
+
+const countryName = (code) => {
+  if (!code || typeof code !== 'string') return code || 'Unknown';
+  const upper = code.toUpperCase();
+  if (COUNTRY_OVERRIDES[upper]) return COUNTRY_OVERRIDES[upper];
+  const dn = getDisplayNames();
+  if (dn) {
+    try {
+      const name = dn.of(upper);
+      // DisplayNames returns the input code unchanged when it doesn't recognise it,
+      // so we treat that as "no match" and fall through.
+      if (name && name !== upper) return name;
+    } catch {
+      // ignore and fall through
+    }
+  }
+  return upper;
+};
 
 const LANG_NAMES = {
   en: 'English', th: 'Thai', zh: 'Chinese', ja: 'Japanese', ko: 'Korean',
