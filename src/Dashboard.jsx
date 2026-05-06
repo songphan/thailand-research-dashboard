@@ -6,7 +6,7 @@ import {
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
   Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X,
-  Table as TableIcon, Download, Search, Quote, Play
+  Table as TableIcon, Download, Search, Quote, Play, ChevronDown
 } from 'lucide-react';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
@@ -196,8 +196,8 @@ const normalizeFilterValue = (key) => {
 
 // excludeDim drops that dimension's chips so a chart can still display its full breakdown
 // when it is the source of the filter (faceted-search "exclusive" pattern).
-const buildFilterString = (year, filters, excludeDim = null) => {
-  const parts = [`authorships.institutions.country_code:TH`, `publication_year:${year}`];
+const buildFilterString = (country, year, filters, excludeDim = null) => {
+  const parts = [`authorships.institutions.country_code:${country}`, `publication_year:${year}`];
   for (const [dim, items] of Object.entries(filters || {})) {
     if (!items || items.length === 0) continue;
     if (dim === excludeDim) continue;
@@ -993,13 +993,252 @@ const TableModal = ({ open, onClose, title, kicker, data }) => {
   );
 };
 
-export default function ThailandResearchDashboard() {
+// All ISO-3166-1 alpha-2 country codes that OpenAlex tracks for institutional affiliation.
+// Order is deliberately not alphabetical; we list ASEAN+major research nations first
+// for quick access at the top of the dropdown, then alphabetise the rest.
+const FEATURED_COUNTRIES = [
+  // ASEAN
+  'TH', 'VN', 'ID', 'MY', 'SG', 'PH', 'LA', 'KH', 'MM', 'BN',
+  // East Asia
+  'CN', 'JP', 'KR', 'TW', 'HK',
+  // South Asia
+  'IN', 'PK', 'BD', 'LK', 'NP',
+  // Anglophone
+  'US', 'GB', 'AU', 'CA', 'NZ', 'IE',
+  // Europe
+  'DE', 'FR', 'NL', 'CH', 'IT', 'ES', 'SE', 'BE', 'AT', 'DK', 'FI', 'NO', 'PT',
+  'PL', 'CZ', 'GR', 'IE',
+  // Other
+  'BR', 'MX', 'AR', 'CL', 'IL', 'TR', 'AE', 'SA', 'EG', 'ZA', 'RU',
+];
+const ALL_ISO_CODES = [
+  'AD','AE','AF','AG','AI','AL','AM','AO','AQ','AR','AS','AT','AU','AW','AX','AZ',
+  'BA','BB','BD','BE','BF','BG','BH','BI','BJ','BL','BM','BN','BO','BQ','BR','BS','BT','BV','BW','BY','BZ',
+  'CA','CC','CD','CF','CG','CH','CI','CK','CL','CM','CN','CO','CR','CU','CV','CW','CX','CY','CZ',
+  'DE','DJ','DK','DM','DO','DZ',
+  'EC','EE','EG','EH','ER','ES','ET',
+  'FI','FJ','FK','FM','FO','FR',
+  'GA','GB','GD','GE','GF','GG','GH','GI','GL','GM','GN','GP','GQ','GR','GS','GT','GU','GW','GY',
+  'HK','HM','HN','HR','HT','HU',
+  'ID','IE','IL','IM','IN','IO','IQ','IR','IS','IT',
+  'JE','JM','JO','JP',
+  'KE','KG','KH','KI','KM','KN','KP','KR','KW','KY','KZ',
+  'LA','LB','LC','LI','LK','LR','LS','LT','LU','LV','LY',
+  'MA','MC','MD','ME','MF','MG','MH','MK','ML','MM','MN','MO','MP','MQ','MR','MS','MT','MU','MV','MW','MX','MY','MZ',
+  'NA','NC','NE','NF','NG','NI','NL','NO','NP','NR','NU','NZ',
+  'OM',
+  'PA','PE','PF','PG','PH','PK','PL','PM','PN','PR','PS','PT','PW','PY',
+  'QA',
+  'RE','RO','RS','RU','RW',
+  'SA','SB','SC','SD','SE','SG','SH','SI','SJ','SK','SL','SM','SN','SO','SR','SS','ST','SV','SX','SY','SZ',
+  'TC','TD','TF','TG','TH','TJ','TK','TL','TM','TN','TO','TR','TT','TV','TW','TZ',
+  'UA','UG','UM','US','UY','UZ',
+  'VA','VC','VE','VG','VI','VN','VU',
+  'WF','WS',
+  'YE','YT',
+  'ZA','ZM','ZW',
+];
+
+const buildCountryList = () => {
+  const seen = new Set();
+  const featured = [];
+  for (const c of FEATURED_COUNTRIES) {
+    if (seen.has(c)) continue;
+    seen.add(c);
+    featured.push({ code: c, name: countryName(c), featured: true });
+  }
+  const rest = [];
+  for (const c of ALL_ISO_CODES) {
+    if (seen.has(c)) continue;
+    rest.push({ code: c, name: countryName(c), featured: false });
+  }
+  rest.sort((a, b) => a.name.localeCompare(b.name));
+  return [...featured, ...rest];
+};
+
+// Country selector: a small button that shows the current country, opens a popover
+// with a search box and a scrollable list when clicked. ASEAN and major research
+// nations are surfaced first for quick switching.
+const CountrySelector = ({ country, onChange }) => {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const allCountries = useMemo(buildCountryList, []);
+  const popRef = React.useRef(null);
+  const btnRef = React.useRef(null);
+  const inputRef = React.useRef(null);
+
+  // Close on outside click and Escape
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (popRef.current?.contains(e.target)) return;
+      if (btnRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    // Focus the search box when the popover opens
+    setTimeout(() => inputRef.current?.focus(), 50);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? allCountries.filter((c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase() === q)
+    : allCountries;
+  const featured = filtered.filter((c) => c.featured);
+  const rest = filtered.filter((c) => !c.featured);
+
+  const pick = (code) => {
+    onChange(code);
+    setOpen(false);
+    setQuery('');
+  };
+
+  return (
+    <div className="relative">
+      <button
+        ref={btnRef}
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 rounded-sm px-3 py-1.5 transition-colors"
+        style={{
+          border: `1px solid ${PALETTE.ink}`,
+          background: PALETTE.ink,
+          color: PALETTE.cream,
+          fontFamily: FONT_MONO,
+          fontSize: 12,
+          letterSpacing: '0.04em',
+        }}
+        title="Switch country"
+      >
+        <Globe2 size={13} />
+        <span style={{ fontWeight: 500 }}>{country}</span>
+        <span style={{ opacity: 0.7, fontFamily: FONT_BODY, letterSpacing: 0 }}>{countryName(country)}</span>
+        <ChevronDown size={13} style={{ opacity: 0.7 }} />
+      </button>
+
+      {open && (
+        <div
+          ref={popRef}
+          className="absolute right-0 z-40 mt-1 w-[320px] rounded-md"
+          style={{
+            background: PALETTE.paper,
+            border: `1px solid ${PALETTE.ink}`,
+            boxShadow: '0 8px 20px rgba(26,22,18,0.12)',
+          }}
+        >
+          <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: PALETTE.rule, background: PALETTE.cream }}>
+            <Search size={13} style={{ color: PALETTE.muted }} />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search country…"
+              className="w-full bg-transparent outline-none"
+              style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.ink }}
+            />
+          </div>
+          <div className="max-h-[420px] overflow-y-auto py-1" role="listbox">
+            {featured.length > 0 && (
+              <>
+                <div
+                  className="px-3 py-1.5"
+                  style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                >
+                  ASEAN & MAJOR RESEARCH NATIONS
+                </div>
+                {featured.map((c) => (
+                  <CountryRow key={c.code} c={c} active={c.code === country} onClick={() => pick(c.code)} />
+                ))}
+              </>
+            )}
+            {rest.length > 0 && (
+              <>
+                <div
+                  className="px-3 py-1.5 mt-1"
+                  style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted, borderTop: `1px solid ${PALETTE.rule}` }}
+                >
+                  ALL COUNTRIES
+                </div>
+                {rest.map((c) => (
+                  <CountryRow key={c.code} c={c} active={c.code === country} onClick={() => pick(c.code)} />
+                ))}
+              </>
+            )}
+            {filtered.length === 0 && (
+              <div className="px-3 py-6 text-center" style={{ color: PALETTE.muted, fontSize: 13 }}>
+                No country matches.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const CountryRow = ({ c, active, onClick }) => (
+  <button
+    onClick={onClick}
+    className="flex w-full items-center gap-3 px-3 py-1.5 text-left transition-colors"
+    style={{
+      background: active ? PALETTE.cream : 'transparent',
+      borderLeft: active ? `3px solid ${PALETTE.burgundy}` : '3px solid transparent',
+      fontFamily: FONT_BODY,
+      fontSize: 13,
+      color: PALETTE.ink,
+    }}
+    onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'rgba(122,46,62,0.04)'; }}
+    onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
+  >
+    <span
+      style={{
+        fontFamily: FONT_MONO,
+        fontSize: 11,
+        color: PALETTE.muted,
+        width: 28,
+        letterSpacing: '0.04em',
+      }}
+    >
+      {c.code}
+    </span>
+    <span className="flex-1">{c.name}</span>
+    {active && (
+      <span style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.burgundy, letterSpacing: '0.1em' }} className="uppercase">
+        Active
+      </span>
+    )}
+  </button>
+);
+
+export default function ResearchOutputDashboard() {
   useFonts();
+
+  // Country code drives the entire dashboard. Default Thailand; persisted in localStorage
+  // so reloads remember the last choice. Validated against ISO regex below.
+  const [country, setCountry] = useState(() => {
+    if (typeof window === 'undefined') return 'TH';
+    const saved = window.localStorage?.getItem('dashboard.country');
+    return /^[A-Z]{2}$/.test(saved || '') ? saved : 'TH';
+  });
 
   const [year, setYear] = useState(2025);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [filters, setFilters] = useState({}); // { dim: [{ value, label }] }
+  const [filters, setFilters] = useState({});
   const [state, setState] = useState({});
+
+  // Persist country and clear filters when it changes (institution/publisher/funder
+  // IDs from one country don't apply once the corpus shifts to another).
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage?.setItem('dashboard.country', country);
+    }
+    setFilters({});
+  }, [country]);
 
   // How many bars/slices each panel shows. Defaults aim for legible at first glance.
   const DEFAULT_LIMITS = {
@@ -1052,12 +1291,12 @@ export default function ThailandResearchDashboard() {
   const clearFilters = () => setFilters({});
 
   const filterStrings = useMemo(() => {
-    const m = { all: buildFilterString(year, filters) };
+    const m = { all: buildFilterString(country, year, filters) };
     Object.keys(DIMENSIONS).forEach((d) => {
-      m[d] = buildFilterString(year, filters, d);
+      m[d] = buildFilterString(country, year, filters, d);
     });
     return m;
-  }, [year, filters]);
+  }, [country, year, filters]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1165,7 +1404,7 @@ export default function ThailandResearchDashboard() {
     run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
       return all
-        .filter((g) => g.key && g.key !== 'TH' && g.key !== 'unknown')
+        .filter((g) => g.key && g.key !== country && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: countryName(g.key), value: g.count }));
     });
 
@@ -1206,7 +1445,7 @@ export default function ThailandResearchDashboard() {
             type: m?.type,
           };
         })
-        .filter((d) => d.country === 'TH');
+        .filter((d) => d.country === country);
     });
 
     return () => { cancelled = true; };
@@ -1302,7 +1541,7 @@ export default function ThailandResearchDashboard() {
               style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.22em' }}
               className="uppercase"
             >
-              Bibliometric Brief · OpenAlex · TH
+              Bibliometric Brief · OpenAlex · {country}
             </div>
             <div
               style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
@@ -1323,18 +1562,19 @@ export default function ThailandResearchDashboard() {
                   color: PALETTE.ink,
                 }}
               >
-                Thailand <em style={{ fontStyle: 'italic', color: PALETTE.burgundy }}>Research</em> Output
+                {countryName(country)} <em style={{ fontStyle: 'italic', color: PALETTE.burgundy }}>Research</em> Output
               </h1>
               <p
                 className="mt-3 max-w-2xl"
                 style={{ fontFamily: FONT_BODY, fontSize: 14, color: PALETTE.charcoal, lineHeight: 1.55 }}
               >
-                A live, policy-oriented breakdown of scholarly works with at least one Thai institutional affiliation,
-                drawn from the OpenAlex knowledge graph. Click any bar or slice to focus the entire dashboard;
+                A live, policy-oriented breakdown of scholarly works with at least one {countryName(country)} institutional
+                affiliation, drawn from the OpenAlex knowledge graph. Click any bar or slice to focus the entire dashboard;
                 click again to release. Multiple filters compose with AND across dimensions and OR within them.
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <CountrySelector country={country} onChange={setCountry} />
               <div className="flex items-center gap-1 rounded-sm" style={{ border: `1px solid ${PALETTE.ink}` }}>
                 {YEARS.map((y) => (
                   <button
@@ -1376,7 +1616,7 @@ export default function ThailandResearchDashboard() {
       <section className="mx-auto max-w-[1400px] px-6 pt-6">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
           <StatCard
-            kicker={filterCount ? 'Filtered works' : 'Total works · TH affiliated'}
+            kicker={filterCount ? 'Filtered works' : `Total works · ${country} affiliated`}
             value={totalCount != null ? fmtFull(totalCount) : '—'}
             sub={`Records in OpenAlex matching the active selection in ${year}.`}
             accent={PALETTE.ink}
@@ -1397,7 +1637,7 @@ export default function ThailandResearchDashboard() {
             loading={state.intlCount?.status === 'loading' || state.total?.status === 'loading'}
           />
           <StatCard
-            kicker="Top contributor · TH"
+            kicker={`Top contributor · ${country}`}
             value={
               topInstitution ? (
                 <span style={{ fontSize: 22, lineHeight: 1.15, fontStyle: 'italic' }}>
@@ -1445,7 +1685,7 @@ export default function ThailandResearchDashboard() {
             <ChartFrame
               status={state.institutions?.status}
               error={state.institutions?.error}
-              hint="Filtered to country_code = TH after group-by lookup."
+              hint={`Filtered to country_code = ${country} after group-by lookup.`}
             >
               <HBar
                 data={sliceFor('institutions')}
@@ -1600,7 +1840,7 @@ export default function ThailandResearchDashboard() {
               icon={Globe2}
               kicker="Co-authorship reach"
               title="International collaborators"
-              hint="Country counts on works with ≥1 TH author"
+              hint={`Country counts on works with ≥1 ${country} author`}
             />
             <ChartFrame
               status={state.collaborators?.status}
@@ -1898,7 +2138,7 @@ export default function ThailandResearchDashboard() {
             <div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase mb-1.5">Source</div>
               All counts come from the OpenAlex Works API filtered by{' '}
-              <code style={{ fontFamily: FONT_MONO, background: PALETTE.cream, padding: '1px 4px' }}>authorships.institutions.country_code:TH</code>{' '}
+              <code style={{ fontFamily: FONT_MONO, background: PALETTE.cream, padding: '1px 4px' }}>authorships.institutions.country_code:{country}</code>{' '}
               and the active selection. SDG and topic tags use OpenAlex’s in-house classifiers; topic taxonomy is hierarchical (domain → field → subfield → topic).
             </div>
             <div>
@@ -1907,7 +2147,9 @@ export default function ThailandResearchDashboard() {
             </div>
             <div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase mb-1.5">2025 caveat</div>
-              The current year is still being indexed. OpenAlex has reported reduced affiliation metadata coverage for some 2025 articles, particularly from commercial publishers, so the absolute count is conservative. Triangulate against Scopus, Web of Science, and Dimensions.
+              The current year is still being indexed. OpenAlex has reported reduced affiliation metadata coverage for some
+              2025 articles, particularly from commercial publishers, so absolute counts are conservative for the latest year.
+              Triangulate against Scopus, Web of Science, and Dimensions for institutional reporting.
             </div>
           </div>
         </Card>
