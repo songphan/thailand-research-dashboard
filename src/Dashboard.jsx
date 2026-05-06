@@ -5,7 +5,8 @@ import {
 } from 'recharts';
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
-  Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X
+  Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X,
+  Table as TableIcon, Download, Search
 } from 'lucide-react';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
@@ -46,18 +47,24 @@ const OA_COLORS = {
 
 const YEARS = [2025, 2024, 2023, 2022, 2021, 2020];
 
-// Each dimension maps a panel key to its OpenAlex filter parameter and a friendly label.
+// Each dimension maps a panel key to its OpenAlex filter parameter, a friendly label,
+// and whether bars/slices in this chart should be clickable to apply a filter. The
+// filterable flag is checked when wiring click handlers; if false, the chart renders
+// statically (no cursor pointer, no selection highlight, no chip in the breadcrumb).
+// Verified against https://developers.openalex.org/api-reference/works on 2026-05-06.
 const DIMENSIONS = {
-  institutions: { filterKey: 'authorships.institutions.id', label: 'Institution' },
-  fields:       { filterKey: 'primary_topic.field.id',     label: 'Field' },
-  subfields:    { filterKey: 'primary_topic.subfield.id',  label: 'Subfield' },
-  docTypes:     { filterKey: 'type',                       label: 'Type' },
-  oaStatus:     { filterKey: 'open_access.oa_status',      label: 'OA' },
-  publishers:   { filterKey: 'primary_location.source.host_organization', label: 'Publisher' },
-  languages:    { filterKey: 'language',                   label: 'Language' },
-  sdgs:         { filterKey: 'sustainable_development_goals.id', label: 'SDG' },
-  collaborators:{ filterKey: 'authorships.countries',      label: 'Co-author' },
-  funders:      { filterKey: 'grants.funder',              label: 'Funder' },
+  institutions: { filterKey: 'authorships.institutions.id',                 label: 'Institution', filterable: true },
+  fields:       { filterKey: 'primary_topic.field.id',                      label: 'Field',       filterable: true },
+  subfields:    { filterKey: 'primary_topic.subfield.id',                   label: 'Subfield',    filterable: true },
+  docTypes:     { filterKey: 'type',                                        label: 'Type',        filterable: true },
+  oaStatus:     { filterKey: 'open_access.oa_status',                       label: 'OA',          filterable: true },
+  publishers:   { filterKey: 'primary_location.source.host_organization',   label: 'Publisher',   filterable: true },
+  languages:    { filterKey: 'language',                                    label: 'Language',    filterable: true },
+  sdgs:         { filterKey: 'sustainable_development_goals.id',            label: 'SDG',         filterable: true },
+  collaborators:{ filterKey: 'authorships.countries',                       label: 'Co-author',   filterable: true },
+  // Was 'grants.funder' until 2025; OpenAlex removed the grants property in favour of
+  // funders and awards. The current filterable + groupable key is funders.id.
+  funders:      { filterKey: 'funders.id',                                  label: 'Funder',      filterable: true },
 };
 
 const useFonts = () => {
@@ -283,14 +290,17 @@ const ChartFrame = ({ status, error, children, hint }) => {
 
 // HBar with toggleable selection. selectedKeys is an array of `key` strings; clicking
 // a bar fires onBarClick({key, label, value}). When something is selected, unselected
-// bars dim to hint at the active focus.
+// bars dim to hint at the active focus. height is auto-computed from row count
+// unless explicitly overridden.
 const HBar = ({
-  data, labelKey = 'label', valueKey = 'value', height = 320,
+  data, labelKey = 'label', valueKey = 'value', height,
   color = PALETTE.navy, accentTop = false, onBarClick, selectedKeys = []
 }) => {
   if (!data || data.length === 0) {
     return <div style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-6">No data.</div>;
   }
+  // Each row roughly 26px; clamp to a reasonable min/max.
+  const computedHeight = height ?? Math.max(220, Math.min(1400, data.length * 26 + 40));
   const hasSelection = selectedKeys.length > 0;
   const opacityFor = (key) => (!hasSelection ? 1 : selectedKeys.includes(key) ? 1 : 0.28);
   const fillFor = (d, i) => {
@@ -301,7 +311,7 @@ const HBar = ({
   const handle = onBarClick ? (entry) => onBarClick(entry) : undefined;
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={computedHeight}>
       <BarChart layout="vertical" data={data} margin={{ left: 8, right: 36, top: 4, bottom: 4 }}>
         <CartesianGrid stroke={PALETTE.rule} strokeDasharray="2 4" horizontal={false} />
         <XAxis
@@ -533,6 +543,299 @@ const FilterBreadcrumb = ({ filters, onRemove, onClear }) => {
   );
 };
 
+// CSV download for the table modal.
+const downloadCsv = (rows, filename) => {
+  const total = rows.reduce((s, d) => s + d.value, 0);
+  const header = ['Rank', 'Label', 'Works', 'Share'];
+  const csvRows = [
+    header.join(','),
+    ...rows.map((d, i) => [
+      i + 1,
+      `"${(d.label || '').replace(/"/g, '""')}"`,
+      d.value,
+      total ? ((d.value / total) * 100).toFixed(2) + '%' : '',
+    ].join(',')),
+  ];
+  const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+// Per-chart toolbar shown beneath the chart. Lets users pick how many bars
+// to render and open the full data as a sortable table.
+const ChartControls = ({
+  total, limit, onLimitChange, onOpenTable,
+  options = [12, 25, 50],
+}) => {
+  if (!total || total === 0) return null;
+  // Hide the size selector entirely when there is so little data it would be pointless.
+  const showSizing = total > options[0];
+  return (
+    <div
+      className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3"
+      style={{ borderColor: PALETTE.rule }}
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        {showSizing && (
+          <>
+            <span
+              style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+              className="uppercase mr-1"
+            >
+              Show
+            </span>
+            {options.filter((n) => n < total).map((n) => {
+              const active = limit === n;
+              return (
+                <button
+                  key={n}
+                  onClick={() => onLimitChange(n)}
+                  className="rounded-sm px-2 py-0.5 transition-colors"
+                  style={{
+                    border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
+                    background: active ? PALETTE.ink : 'transparent',
+                    color: active ? PALETTE.cream : PALETTE.charcoal,
+                    fontFamily: FONT_MONO,
+                    fontSize: 11,
+                  }}
+                >
+                  {n}
+                </button>
+              );
+            })}
+            <button
+              onClick={() => onLimitChange(total)}
+              className="rounded-sm px-2 py-0.5 transition-colors"
+              style={{
+                border: `1px solid ${limit >= total ? PALETTE.ink : PALETTE.rule}`,
+                background: limit >= total ? PALETTE.ink : 'transparent',
+                color: limit >= total ? PALETTE.cream : PALETTE.charcoal,
+                fontFamily: FONT_MONO,
+                fontSize: 11,
+              }}
+              title="Render every available bar inline"
+            >
+              All ({total})
+            </button>
+          </>
+        )}
+      </div>
+      <button
+        onClick={onOpenTable}
+        className="flex items-center gap-1.5 rounded-sm px-2.5 py-1 transition-colors"
+        style={{
+          border: `1px solid ${PALETTE.ink}`,
+          background: 'transparent',
+          color: PALETTE.ink,
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          letterSpacing: '0.06em',
+        }}
+        title="Open full sortable table"
+      >
+        <TableIcon size={12} />
+        <span>Table & CSV</span>
+      </button>
+    </div>
+  );
+};
+
+// Modal table: searchable, sortable, exportable. Used for "View all" on any chart.
+const TableModal = ({ open, onClose, title, kicker, data }) => {
+  const [search, setSearch] = useState('');
+  const [sortDir, setSortDir] = useState('desc'); // 'asc' or 'desc' on works
+  const [sortBy, setSortBy] = useState('value'); // 'rank' | 'label' | 'value'
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    // Lock background scroll while modal open
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const total = (data || []).reduce((s, d) => s + d.value, 0);
+  const filtered = (data || []).filter((d) =>
+    !search.trim() || (d.label || '').toLowerCase().includes(search.trim().toLowerCase())
+  );
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp;
+    if (sortBy === 'label') cmp = (a.label || '').localeCompare(b.label || '');
+    else if (sortBy === 'value') cmp = a.value - b.value;
+    else cmp = 0;
+    return sortDir === 'asc' ? cmp : -cmp;
+  });
+
+  const toggleSort = (col) => {
+    if (sortBy === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortBy(col); setSortDir(col === 'label' ? 'asc' : 'desc'); }
+  };
+
+  const arrow = (col) => sortBy === col ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(26, 22, 18, 0.55)', fontFamily: FONT_BODY }}
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-md"
+        style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.ink}` }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header
+          className="flex items-start justify-between gap-4 border-b px-5 py-4"
+          style={{ borderColor: PALETTE.rule }}
+        >
+          <div>
+            <div
+              style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.2em' }}
+              className="uppercase"
+            >
+              {kicker}
+            </div>
+            <h3
+              style={{ fontFamily: FONT_DISPLAY, color: PALETTE.ink, fontSize: 22, fontWeight: 500, fontStyle: 'italic', lineHeight: 1.15 }}
+              className="mt-0.5"
+            >
+              {title}
+            </h3>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }} className="mt-1">
+              {sorted.length.toLocaleString()} of {(data || []).length.toLocaleString()} rows · {fmtFull(total)} total works
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-sm"
+            style={{ border: `1px solid ${PALETTE.rule}`, color: PALETTE.ink, background: 'transparent' }}
+            aria-label="Close"
+          >
+            <X size={14} />
+          </button>
+        </header>
+
+        <div className="flex flex-wrap items-center gap-2 px-5 py-3" style={{ borderBottom: `1px solid ${PALETTE.rule}` }}>
+          <div className="flex flex-1 items-center gap-2 rounded-sm px-2.5 py-1.5" style={{ border: `1px solid ${PALETTE.rule}`, background: PALETTE.cream }}>
+            <Search size={13} style={{ color: PALETTE.muted }} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filter by name…"
+              className="w-full bg-transparent outline-none"
+              style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.ink }}
+            />
+          </div>
+          <button
+            onClick={() => downloadCsv(sorted, `${(title || 'data').toLowerCase().replace(/\s+/g, '-')}.csv`)}
+            className="flex items-center gap-1.5 rounded-sm px-3 py-1.5"
+            style={{
+              background: PALETTE.ink, color: PALETTE.cream,
+              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.06em',
+            }}
+            title="Download visible rows as CSV"
+          >
+            <Download size={12} />
+            <span>CSV</span>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          <table className="w-full" style={{ fontFamily: FONT_BODY, fontSize: 13 }}>
+            <thead
+              className="sticky top-0"
+              style={{
+                background: PALETTE.paper,
+                borderBottom: `1px solid ${PALETTE.ink}`,
+                boxShadow: `0 1px 0 ${PALETTE.rule}`,
+              }}
+            >
+              <tr>
+                <th
+                  onClick={() => toggleSort('rank')}
+                  className="px-5 py-2.5 text-left"
+                  style={{ width: 56, cursor: 'pointer', fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }}
+                >
+                  #
+                </th>
+                <th
+                  onClick={() => toggleSort('label')}
+                  className="px-3 py-2.5 text-left"
+                  style={{ cursor: 'pointer', fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }}
+                >
+                  NAME{arrow('label')}
+                </th>
+                <th
+                  onClick={() => toggleSort('value')}
+                  className="px-3 py-2.5 text-right"
+                  style={{ cursor: 'pointer', fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted, width: 110 }}
+                >
+                  WORKS{arrow('value')}
+                </th>
+                <th
+                  className="px-5 py-2.5 text-right"
+                  style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted, width: 90 }}
+                >
+                  SHARE
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((d, i) => (
+                <tr
+                  key={d.key || i}
+                  style={{
+                    borderBottom: `1px solid ${PALETTE.rule}`,
+                  }}
+                  className="hover:bg-[var(--cream)]"
+                >
+                  <td className="px-5 py-2" style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
+                    {i + 1}
+                  </td>
+                  <td className="px-3 py-2" style={{ color: PALETTE.charcoal }}>{d.label}</td>
+                  <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
+                    {fmtFull(d.value)}
+                  </td>
+                  <td className="px-5 py-2 text-right" style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
+                    {pct(d.value, total)}
+                  </td>
+                </tr>
+              ))}
+              {sorted.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="px-5 py-10 text-center" style={{ color: PALETTE.muted }}>
+                    No rows match your filter.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <footer
+          className="border-t px-5 py-3"
+          style={{ borderColor: PALETTE.rule, fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }}
+        >
+          <span className="uppercase">Esc to close · Click headers to sort · Search filters in place</span>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
 export default function ThailandResearchDashboard() {
   useFonts();
 
@@ -540,6 +843,19 @@ export default function ThailandResearchDashboard() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [filters, setFilters] = useState({}); // { dim: [{ value, label }] }
   const [state, setState] = useState({});
+
+  // How many bars/slices each panel shows. Defaults aim for legible at first glance.
+  const DEFAULT_LIMITS = {
+    institutions: 15, fields: 14, subfields: 12, docTypes: 7,
+    oaStatus: 6, publishers: 12, languages: 8, sdgs: 14,
+    collaborators: 14, funders: 12,
+  };
+  const [displayLimits, setDisplayLimits] = useState(DEFAULT_LIMITS);
+  const [tableOpenDim, setTableOpenDim] = useState(null);
+
+  const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
+  const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
+  const sliceFor = (dim) => (state[dim]?.data || []).slice(0, limitFor(dim));
 
   const toggleFilter = (dim, item) => {
     setFilters((prev) => {
@@ -639,36 +955,31 @@ export default function ThailandResearchDashboard() {
           value: g.count,
         }))
         .filter((d) => d.value > 0)
-        .slice(0, 8)
     );
 
     run('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
       (j.group_by || [])
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 32), value: g.count }))
         .filter((d) => d.value > 0)
-        .slice(0, 14)
     );
 
     run('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
       (j.group_by || [])
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
         .filter((d) => d.value > 0)
-        .slice(0, 12)
     );
 
     run('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
       (j.group_by || [])
         .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 36), value: g.count }))
-        .slice(0, 12)
     );
 
     run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
       return all
         .filter((g) => g.key && g.key !== 'TH' && g.key !== 'unknown')
-        .map((g) => ({ key: g.key, label: countryName(g.key), value: g.count }))
-        .slice(0, 14);
+        .map((g) => ({ key: g.key, label: countryName(g.key), value: g.count }));
     });
 
     run('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
@@ -679,18 +990,16 @@ export default function ThailandResearchDashboard() {
           return { key: g.key, label: cleanLabel(label, 42), value: g.count };
         })
         .filter((d) => d.value > 0)
-        .slice(0, 14)
     );
 
-    run('funders', groupUrl(filterStrings.funders, 'grants.funder'), (j) =>
+    run('funders', groupUrl(filterStrings.funders, 'funders.id'), (j) =>
       (j.group_by || [])
         .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
-        .slice(0, 12)
     );
 
     run('institutions', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), async (j) => {
-      const top = (j.group_by || []).slice(0, 60);
+      const top = j.group_by || [];
       if (top.length === 0) return [];
       const ids = top.map((g) => stripPrefix(g.key));
       const meta = await fetchJson(institutionsBatchUrl(ids));
@@ -710,8 +1019,7 @@ export default function ThailandResearchDashboard() {
             type: m?.type,
           };
         })
-        .filter((d) => d.country === 'TH')
-        .slice(0, 15);
+        .filter((d) => d.country === 'TH');
     });
 
     return () => { cancelled = true; };
@@ -719,9 +1027,15 @@ export default function ThailandResearchDashboard() {
 
   const selKeys = (dim) => (filters[dim] || []).map((f) => f.value);
 
-  const onPick = (dim) => (entry) => {
-    if (!entry || !entry.key) return;
-    toggleFilter(dim, { value: entry.key, label: entry.label });
+  // Returns a click handler only if the dimension is filterable; otherwise undefined,
+  // which causes HBar/Donut to render without cursor pointer or selection styling.
+  const onPick = (dim) => {
+    const def = DIMENSIONS[dim];
+    if (!def?.filterable) return undefined;
+    return (entry) => {
+      if (!entry || !entry.key) return;
+      toggleFilter(dim, { value: entry.key, label: entry.label });
+    };
   };
 
   const totalCount = state.total?.data;
@@ -863,7 +1177,7 @@ export default function ThailandResearchDashboard() {
               icon={Building2}
               kicker="Producing institutions"
               title="Where the research happens"
-              hint="Top 15 Thai institutions · click to filter"
+              hint="Top Thai institutions · click to filter"
             />
             <ChartFrame
               status={state.institutions?.status}
@@ -871,12 +1185,17 @@ export default function ThailandResearchDashboard() {
               hint="Filtered to country_code = TH after group-by lookup."
             >
               <HBar
-                data={state.institutions?.data || []}
-                height={420}
+                data={sliceFor('institutions')}
                 color={PALETTE.navy}
                 accentTop
                 onBarClick={onPick('institutions')}
                 selectedKeys={selKeys('institutions')}
+              />
+              <ChartControls
+                total={(state.institutions?.data || []).length}
+                limit={limitFor('institutions')}
+                onLimitChange={setLimit('institutions')}
+                onOpenTable={() => setTableOpenDim('institutions')}
               />
             </ChartFrame>
           </Card>
@@ -890,11 +1209,16 @@ export default function ThailandResearchDashboard() {
             />
             <ChartFrame status={state.fields?.status} error={state.fields?.error}>
               <HBar
-                data={state.fields?.data || []}
-                height={420}
+                data={sliceFor('fields')}
                 color={PALETTE.burgundy}
                 onBarClick={onPick('fields')}
                 selectedKeys={selKeys('fields')}
+              />
+              <ChartControls
+                total={(state.fields?.data || []).length}
+                limit={limitFor('fields')}
+                onLimitChange={setLimit('fields')}
+                onOpenTable={() => setTableOpenDim('fields')}
               />
             </ChartFrame>
           </Card>
@@ -903,10 +1227,17 @@ export default function ThailandResearchDashboard() {
             <SectionTitle icon={FileText} kicker="Output forms" title="Document types" />
             <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
               <Donut
-                data={(state.docTypes?.data || []).slice(0, 7)}
+                data={sliceFor('docTypes')}
                 height={260}
                 onSliceClick={onPick('docTypes')}
                 selectedKeys={selKeys('docTypes')}
+              />
+              <ChartControls
+                total={(state.docTypes?.data || []).length}
+                limit={limitFor('docTypes')}
+                onLimitChange={setLimit('docTypes')}
+                onOpenTable={() => setTableOpenDim('docTypes')}
+                options={[5, 7, 10]}
               />
             </ChartFrame>
           </Card>
@@ -920,11 +1251,18 @@ export default function ThailandResearchDashboard() {
             />
             <ChartFrame status={state.oaStatus?.status} error={state.oaStatus?.error}>
               <Donut
-                data={state.oaStatus?.data || []}
+                data={sliceFor('oaStatus')}
                 height={260}
                 colorMap={OA_COLORS}
                 onSliceClick={onPick('oaStatus')}
                 selectedKeys={selKeys('oaStatus')}
+              />
+              <ChartControls
+                total={(state.oaStatus?.data || []).length}
+                limit={limitFor('oaStatus')}
+                onLimitChange={setLimit('oaStatus')}
+                onOpenTable={() => setTableOpenDim('oaStatus')}
+                options={[5, 6]}
               />
             </ChartFrame>
           </Card>
@@ -933,10 +1271,17 @@ export default function ThailandResearchDashboard() {
             <SectionTitle icon={Languages} kicker="Language of record" title="Publication languages" />
             <ChartFrame status={state.languages?.status} error={state.languages?.error}>
               <Donut
-                data={state.languages?.data || []}
+                data={sliceFor('languages')}
                 height={260}
                 onSliceClick={onPick('languages')}
                 selectedKeys={selKeys('languages')}
+              />
+              <ChartControls
+                total={(state.languages?.data || []).length}
+                limit={limitFor('languages')}
+                onLimitChange={setLimit('languages')}
+                onOpenTable={() => setTableOpenDim('languages')}
+                options={[5, 8, 12]}
               />
             </ChartFrame>
           </Card>
@@ -950,11 +1295,16 @@ export default function ThailandResearchDashboard() {
             />
             <ChartFrame status={state.publishers?.status} error={state.publishers?.error}>
               <HBar
-                data={state.publishers?.data || []}
-                height={380}
+                data={sliceFor('publishers')}
                 color={PALETTE.teal}
                 onBarClick={onPick('publishers')}
                 selectedKeys={selKeys('publishers')}
+              />
+              <ChartControls
+                total={(state.publishers?.data || []).length}
+                limit={limitFor('publishers')}
+                onLimitChange={setLimit('publishers')}
+                onOpenTable={() => setTableOpenDim('publishers')}
               />
             </ChartFrame>
           </Card>
@@ -968,11 +1318,16 @@ export default function ThailandResearchDashboard() {
             />
             <ChartFrame status={state.subfields?.status} error={state.subfields?.error}>
               <HBar
-                data={state.subfields?.data || []}
-                height={380}
+                data={sliceFor('subfields')}
                 color={PALETTE.forest}
                 onBarClick={onPick('subfields')}
                 selectedKeys={selKeys('subfields')}
+              />
+              <ChartControls
+                total={(state.subfields?.data || []).length}
+                limit={limitFor('subfields')}
+                onLimitChange={setLimit('subfields')}
+                onOpenTable={() => setTableOpenDim('subfields')}
               />
             </ChartFrame>
           </Card>
@@ -990,11 +1345,16 @@ export default function ThailandResearchDashboard() {
               hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
             >
               <HBar
-                data={state.collaborators?.data || []}
-                height={420}
+                data={sliceFor('collaborators')}
                 color={PALETTE.plum}
                 onBarClick={onPick('collaborators')}
                 selectedKeys={selKeys('collaborators')}
+              />
+              <ChartControls
+                total={(state.collaborators?.data || []).length}
+                limit={limitFor('collaborators')}
+                onLimitChange={setLimit('collaborators')}
+                onOpenTable={() => setTableOpenDim('collaborators')}
               />
             </ChartFrame>
           </Card>
@@ -1008,11 +1368,17 @@ export default function ThailandResearchDashboard() {
             />
             <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
               <HBar
-                data={state.sdgs?.data || []}
-                height={420}
+                data={sliceFor('sdgs')}
                 color={PALETTE.gold}
                 onBarClick={onPick('sdgs')}
                 selectedKeys={selKeys('sdgs')}
+              />
+              <ChartControls
+                total={(state.sdgs?.data || []).length}
+                limit={limitFor('sdgs')}
+                onLimitChange={setLimit('sdgs')}
+                onOpenTable={() => setTableOpenDim('sdgs')}
+                options={[10, 14, 17]}
               />
             </ChartFrame>
           </Card>
@@ -1030,11 +1396,16 @@ export default function ThailandResearchDashboard() {
               hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
             >
               <HBar
-                data={state.funders?.data || []}
-                height={380}
+                data={sliceFor('funders')}
                 color={PALETTE.rust}
                 onBarClick={onPick('funders')}
                 selectedKeys={selKeys('funders')}
+              />
+              <ChartControls
+                total={(state.funders?.data || []).length}
+                limit={limitFor('funders')}
+                onLimitChange={setLimit('funders')}
+                onOpenTable={() => setTableOpenDim('funders')}
               />
             </ChartFrame>
           </Card>
@@ -1145,6 +1516,14 @@ export default function ThailandResearchDashboard() {
           <div className="uppercase">Live API · No caching · Counts may shift between loads</div>
         </div>
       </footer>
+
+      <TableModal
+        open={!!tableOpenDim}
+        onClose={() => setTableOpenDim(null)}
+        title={tableOpenDim ? (DIMENSIONS[tableOpenDim]?.label || tableOpenDim) : ''}
+        kicker="Full data · sortable · exportable"
+        data={tableOpenDim ? (state[tableOpenDim]?.data || []) : []}
+      />
     </div>
   );
 }
