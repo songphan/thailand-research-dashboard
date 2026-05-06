@@ -980,6 +980,25 @@ export default function ThailandResearchDashboard() {
     run('oaCount', countUrl(filterStrings.all, 'is_oa:true'), (j) => j?.meta?.count ?? 0);
     run('intlCount', countUrl(filterStrings.all, 'countries_distinct_count:>1'), (j) => j?.meta?.count ?? 0);
 
+    // Outgoing citations: sum (refs * works) across the reference-count distribution.
+    // OpenAlex doesn't expose a direct sum aggregation, so we group_by referenced_works_count
+    // and compute the weighted total client-side. Note: works whose bibliographies haven't
+    // been parsed land in the key=0 bucket, so we also surface the "with refs" count.
+    run('outgoingCites', groupUrl(filterStrings.all, 'referenced_works_count'), (j) => {
+      const groups = j?.group_by || [];
+      let totalRefs = 0;
+      let totalWorks = 0;
+      let worksWithRefs = 0;
+      for (const g of groups) {
+        const refs = Number(g.key) || 0;
+        const c = g.count || 0;
+        totalRefs += refs * c;
+        totalWorks += c;
+        if (refs > 0) worksWithRefs += c;
+      }
+      return { totalRefs, totalWorks, worksWithRefs };
+    });
+
     run('topWorks', topWorksUrl(filterStrings.all), (j) =>
       (j.results || []).map((w) => ({
         id: w.id,
@@ -1197,7 +1216,7 @@ export default function ThailandResearchDashboard() {
       </header>
 
       <section className="mx-auto max-w-[1400px] px-6 pt-6">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
           <StatCard
             kicker={filterCount ? 'Filtered works' : 'Total works · TH affiliated'}
             value={totalCount != null ? fmtFull(totalCount) : '—'}
@@ -1231,6 +1250,27 @@ export default function ThailandResearchDashboard() {
             sub={topInstitution ? `${fmtFull(topInstitution.value)} works · ${pct(topInstitution.value, totalCount || 0)} of current selection` : 'Loading…'}
             accent={PALETTE.burgundy}
             loading={state.institutions?.status === 'loading'}
+          />
+          <StatCard
+            kicker="Outgoing citations"
+            value={
+              state.outgoingCites?.data?.totalRefs != null
+                ? fmt(state.outgoingCites.data.totalRefs)
+                : '—'
+            }
+            sub={
+              state.outgoingCites?.data
+                ? (() => {
+                    const { totalRefs, totalWorks, worksWithRefs } = state.outgoingCites.data;
+                    if (!worksWithRefs) return 'No reference data parsed for this selection.';
+                    const avg = (totalRefs / worksWithRefs).toFixed(1);
+                    const cov = pct(worksWithRefs, totalWorks);
+                    return `${avg} refs/work avg · ${fmtFull(worksWithRefs)} of ${fmtFull(totalWorks)} works (${cov}) have parsed references.`;
+                  })()
+                : 'Loading slice…'
+            }
+            accent={PALETTE.plum}
+            loading={state.outgoingCites?.status === 'loading'}
           />
         </div>
       </section>
