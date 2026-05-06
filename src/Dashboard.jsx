@@ -10,6 +10,11 @@ import {
 
 const OPENALEX_BASE = 'https://api.openalex.org';
 
+// Set this to your email to enter the OpenAlex "polite pool" (100k req/day, far higher
+// per-second limits). Leave as empty string to remain anonymous (10 req/sec, you may see
+// 429 errors when many panels load at once). Either an institutional or personal address works.
+const OPENALEX_EMAIL = 'songphan.c@chula.ac.th';
+
 const PALETTE = {
   cream: '#f6f1e7',
   paper: '#fbf8f1',
@@ -146,29 +151,41 @@ const buildFilterString = (year, filters, excludeDim = null) => {
   return parts.join(',');
 };
 
-async function fetchJson(url, timeoutMs = 25000) {
+async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      // Retry once on transient failures: 429 (rate limit), 502/503/504 (gateway/timeout)
+      if ((res.status === 429 || res.status >= 502) && attempt < 1) {
+        clearTimeout(t);
+        await new Promise((r) => setTimeout(r, 800 + Math.random() * 600));
+        return fetchJson(url, timeoutMs, attempt + 1);
+      }
+      throw new Error(`HTTP ${res.status} ${res.statusText || ''}`.trim());
+    }
     return await res.json();
   } finally {
     clearTimeout(t);
   }
 }
 
+// Append the polite-pool mailto if configured.
+const withMailto = (url) =>
+  OPENALEX_EMAIL ? url + (url.includes('?') ? '&' : '?') + `mailto=${encodeURIComponent(OPENALEX_EMAIL)}` : url;
+
 const groupUrl = (filterStr, groupBy, perPage = 200) =>
-  `${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=${perPage}`;
+  withMailto(`${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=${perPage}`);
 
 const countUrl = (filterStr, extra = '') =>
-  `${OPENALEX_BASE}/works?filter=${filterStr}${extra ? ',' + extra : ''}&per-page=1`;
+  withMailto(`${OPENALEX_BASE}/works?filter=${filterStr}${extra ? ',' + extra : ''}&per-page=1`);
 
 const topWorksUrl = (filterStr) =>
-  `${OPENALEX_BASE}/works?filter=${filterStr}&sort=cited_by_count:desc&per-page=10&select=id,doi,title,cited_by_count,authorships,primary_location,type,open_access`;
+  withMailto(`${OPENALEX_BASE}/works?filter=${filterStr}&sort=cited_by_count:desc&per-page=10&select=id,doi,title,cited_by_count,authorships,primary_location,type,open_access`);
 
 const institutionsBatchUrl = (ids) =>
-  `${OPENALEX_BASE}/institutions?filter=openalex:${ids.join('|')}&per-page=200&select=id,display_name,country_code,type,ror`;
+  withMailto(`${OPENALEX_BASE}/institutions?filter=openalex:${ids.join('|')}&per-page=200&select=id,display_name,country_code,type,ror`);
 
 const Card = ({ children, className = '', style = {} }) => (
   <div
