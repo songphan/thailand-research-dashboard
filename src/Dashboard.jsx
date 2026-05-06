@@ -14,7 +14,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // Set this to your email to enter the OpenAlex "polite pool" (100k req/day, far higher
 // per-second limits). Leave as empty string to remain anonymous (10 req/sec, you may see
 // 429 errors when many panels load at once). Either an institutional or personal address works.
-const OPENALEX_EMAIL = 'songphan.c@chula.ac.th';
+const OPENALEX_EMAIL = 'songphan@chula.ac.th';
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -193,6 +193,23 @@ const topWorksUrl = (filterStr) =>
 
 const institutionsBatchUrl = (ids) =>
   withMailto(`${OPENALEX_BASE}/institutions?filter=openalex:${ids.join('|')}&per-page=200&select=id,display_name,country_code,type,ror`);
+
+// Look up institution metadata for an arbitrary number of OpenAlex IDs without
+// blowing past URL length limits. Each chunk's URL stays comfortably under 2 KB.
+// Failed chunks are skipped so a partial result is better than no result.
+async function fetchInstitutionsMetadata(ids, chunkSize = 40) {
+  if (!ids || ids.length === 0) return [];
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    chunks.push(ids.slice(i, i + chunkSize));
+  }
+  const responses = await Promise.allSettled(
+    chunks.map((chunk) => fetchJson(institutionsBatchUrl(chunk)))
+  );
+  return responses.flatMap((r) =>
+    r.status === 'fulfilled' ? (r.value?.results || []) : []
+  );
+}
 
 const Card = ({ children, className = '', style = {} }) => (
   <div
@@ -1002,9 +1019,9 @@ export default function ThailandResearchDashboard() {
       const top = j.group_by || [];
       if (top.length === 0) return [];
       const ids = top.map((g) => stripPrefix(g.key));
-      const meta = await fetchJson(institutionsBatchUrl(ids));
+      const insts = await fetchInstitutionsMetadata(ids);
       const byId = {};
-      (meta.results || []).forEach((inst) => {
+      insts.forEach((inst) => {
         byId[stripPrefix(inst.id)] = inst;
       });
       return top
