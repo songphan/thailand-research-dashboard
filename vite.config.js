@@ -5,7 +5,7 @@ import react from '@vitejs/plugin-react'
 // For GitHub Pages under a sub-path, replace './' with '/your-repo-name/'.
 export default defineConfig({
   plugins: [react()],
-  base: './',
+  base: '/thailand-research-dashboard/',
   server: {
     port: 5173,
     open: true,
