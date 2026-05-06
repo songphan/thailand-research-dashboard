@@ -5,7 +5,7 @@ import {
 } from 'recharts';
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
-  Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2
+  Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X
 } from 'lucide-react';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
@@ -41,7 +41,20 @@ const OA_COLORS = {
 
 const YEARS = [2025, 2024, 2023, 2022, 2021, 2020];
 
-// Inject editorial typography
+// Each dimension maps a panel key to its OpenAlex filter parameter and a friendly label.
+const DIMENSIONS = {
+  institutions: { filterKey: 'authorships.institutions.id', label: 'Institution' },
+  fields:       { filterKey: 'primary_topic.field.id',     label: 'Field' },
+  subfields:    { filterKey: 'primary_topic.subfield.id',  label: 'Subfield' },
+  docTypes:     { filterKey: 'type',                       label: 'Type' },
+  oaStatus:     { filterKey: 'open_access.oa_status',      label: 'OA' },
+  publishers:   { filterKey: 'primary_location.source.host_organization', label: 'Publisher' },
+  languages:    { filterKey: 'language',                   label: 'Language' },
+  sdgs:         { filterKey: 'sustainable_development_goals.id', label: 'SDG' },
+  collaborators:{ filterKey: 'authorships.countries',      label: 'Co-author' },
+  funders:      { filterKey: 'grants.funder',              label: 'Funder' },
+};
+
 const useFonts = () => {
   useEffect(() => {
     const existing = document.querySelector('link[data-th-fonts]');
@@ -77,7 +90,6 @@ const cleanLabel = (label, max = 38) => {
   return label.length > max ? label.slice(0, max - 1) + '…' : label;
 };
 
-// Country code to name (a small, useful subset for collaborators)
 const COUNTRIES = {
   TH: 'Thailand', US: 'United States', CN: 'China', JP: 'Japan', GB: 'United Kingdom',
   DE: 'Germany', AU: 'Australia', KR: 'South Korea', IN: 'India', FR: 'France',
@@ -91,7 +103,6 @@ const COUNTRIES = {
   PK: 'Pakistan', BD: 'Bangladesh', NP: 'Nepal', LK: 'Sri Lanka', MX: 'Mexico',
   CL: 'Chile', AR: 'Argentina',
 };
-
 const countryName = (code) => COUNTRIES[code] || code;
 
 const LANG_NAMES = {
@@ -101,25 +112,40 @@ const LANG_NAMES = {
 };
 
 const TYPE_NAMES = {
-  article: 'Journal article',
-  'book-chapter': 'Book chapter',
-  book: 'Book',
-  dissertation: 'Dissertation',
-  preprint: 'Preprint',
-  dataset: 'Dataset',
-  review: 'Review',
-  paratext: 'Paratext',
-  editorial: 'Editorial',
-  letter: 'Letter',
-  report: 'Report',
-  'reference-entry': 'Reference entry',
-  standard: 'Standard',
-  'peer-review': 'Peer review',
-  erratum: 'Erratum',
-  other: 'Other',
+  article: 'Journal article', 'book-chapter': 'Book chapter', book: 'Book',
+  dissertation: 'Dissertation', preprint: 'Preprint', dataset: 'Dataset',
+  review: 'Review', paratext: 'Paratext', editorial: 'Editorial', letter: 'Letter',
+  report: 'Report', 'reference-entry': 'Reference entry', standard: 'Standard',
+  'peer-review': 'Peer review', erratum: 'Erratum', other: 'Other',
 };
 
-// Fetcher with timeout and JSON parse
+// Convert group_by keys (URLs and codes) to the value form OpenAlex accepts in filters.
+const normalizeFilterValue = (key) => {
+  if (typeof key !== 'string') return String(key);
+  let m = key.match(/^https:\/\/openalex\.org\/([A-Z]\d+)$/);
+  if (m) return m[1];
+  m = key.match(/^https:\/\/openalex\.org\/(fields|subfields|topics|domains)\/(\w+)$/);
+  if (m) return m[2];
+  m = key.match(/^https:\/\/metadata\.un\.org\/sdg\/(\d+)$/);
+  if (m) return m[1];
+  return key;
+};
+
+// excludeDim drops that dimension's chips so a chart can still display its full breakdown
+// when it is the source of the filter (faceted-search "exclusive" pattern).
+const buildFilterString = (year, filters, excludeDim = null) => {
+  const parts = [`authorships.institutions.country_code:TH`, `publication_year:${year}`];
+  for (const [dim, items] of Object.entries(filters || {})) {
+    if (!items || items.length === 0) continue;
+    if (dim === excludeDim) continue;
+    const def = DIMENSIONS[dim];
+    if (!def) continue;
+    const values = items.map((i) => normalizeFilterValue(i.value)).join('|');
+    parts.push(`${def.filterKey}:${values}`);
+  }
+  return parts.join(',');
+};
+
 async function fetchJson(url, timeoutMs = 25000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -132,26 +158,17 @@ async function fetchJson(url, timeoutMs = 25000) {
   }
 }
 
-// Build a base filter
-const baseFilter = (year) => `authorships.institutions.country_code:TH,publication_year:${year}`;
+const groupUrl = (filterStr, groupBy, perPage = 200) =>
+  `${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=${perPage}`;
 
-// Group-by query
-const groupUrl = (year, groupBy, perPage = 200) =>
-  `${OPENALEX_BASE}/works?filter=${baseFilter(year)}&group_by=${groupBy}&per-page=${perPage}`;
+const countUrl = (filterStr, extra = '') =>
+  `${OPENALEX_BASE}/works?filter=${filterStr}${extra ? ',' + extra : ''}&per-page=1`;
 
-// Total count (per-page=1 for efficiency)
-const countUrl = (year, extraFilter = '') =>
-  `${OPENALEX_BASE}/works?filter=${baseFilter(year)}${extraFilter ? ',' + extraFilter : ''}&per-page=1`;
+const topWorksUrl = (filterStr) =>
+  `${OPENALEX_BASE}/works?filter=${filterStr}&sort=cited_by_count:desc&per-page=10&select=id,doi,title,cited_by_count,authorships,primary_location,type,open_access`;
 
-// Top works by citations
-const topWorksUrl = (year) =>
-  `${OPENALEX_BASE}/works?filter=${baseFilter(year)}&sort=cited_by_count:desc&per-page=10&select=id,doi,title,cited_by_count,authorships,primary_location,type,open_access`;
-
-// Institution metadata batch lookup
 const institutionsBatchUrl = (ids) =>
   `${OPENALEX_BASE}/institutions?filter=openalex:${ids.join('|')}&per-page=200&select=id,display_name,country_code,type,ror`;
-
-// ---------- UI components ----------
 
 const Card = ({ children, className = '', style = {} }) => (
   <div
@@ -247,10 +264,25 @@ const ChartFrame = ({ status, error, children, hint }) => {
   );
 };
 
-const HBar = ({ data, labelKey = 'label', valueKey = 'value', height = 320, color = PALETTE.navy, accentTop = false }) => {
+// HBar with toggleable selection. selectedKeys is an array of `key` strings; clicking
+// a bar fires onBarClick({key, label, value}). When something is selected, unselected
+// bars dim to hint at the active focus.
+const HBar = ({
+  data, labelKey = 'label', valueKey = 'value', height = 320,
+  color = PALETTE.navy, accentTop = false, onBarClick, selectedKeys = []
+}) => {
   if (!data || data.length === 0) {
     return <div style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-6">No data.</div>;
   }
+  const hasSelection = selectedKeys.length > 0;
+  const opacityFor = (key) => (!hasSelection ? 1 : selectedKeys.includes(key) ? 1 : 0.28);
+  const fillFor = (d, i) => {
+    if (selectedKeys.includes(d.key)) return PALETTE.burgundy;
+    if (accentTop && i === 0 && !hasSelection) return PALETTE.burgundy;
+    return color;
+  };
+  const handle = onBarClick ? (entry) => onBarClick(entry) : undefined;
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart layout="vertical" data={data} margin={{ left: 8, right: 36, top: 4, bottom: 4 }}>
@@ -281,9 +313,20 @@ const HBar = ({ data, labelKey = 'label', valueKey = 'value', height = 320, colo
           }}
           formatter={(v) => [fmtFull(v), 'Works']}
         />
-        <Bar dataKey={valueKey} radius={[0, 1, 1, 0]}>
-          {data.map((_, i) => (
-            <Cell key={i} fill={accentTop && i === 0 ? PALETTE.burgundy : color} />
+        <Bar
+          dataKey={valueKey}
+          radius={[0, 1, 1, 0]}
+          onClick={handle}
+          style={{ cursor: handle ? 'pointer' : 'default' }}
+        >
+          {data.map((d, i) => (
+            <Cell
+              key={i}
+              fill={fillFor(d, i)}
+              fillOpacity={opacityFor(d.key)}
+              stroke={selectedKeys.includes(d.key) ? PALETTE.ink : 'none'}
+              strokeWidth={selectedKeys.includes(d.key) ? 1.5 : 0}
+            />
           ))}
           <LabelList
             dataKey={valueKey}
@@ -297,8 +340,12 @@ const HBar = ({ data, labelKey = 'label', valueKey = 'value', height = 320, colo
   );
 };
 
-const Donut = ({ data, height = 280, colorMap }) => {
+const Donut = ({ data, height = 280, colorMap, onSliceClick, selectedKeys = [] }) => {
   const total = data.reduce((s, d) => s + d.value, 0);
+  const hasSelection = selectedKeys.length > 0;
+  const opacityFor = (key) => (!hasSelection ? 1 : selectedKeys.includes(key) ? 1 : 0.25);
+  const handle = onSliceClick ? (entry) => onSliceClick(entry) : undefined;
+
   return (
     <div className="flex items-center gap-4">
       <div style={{ width: '55%' }}>
@@ -315,9 +362,17 @@ const Donut = ({ data, height = 280, colorMap }) => {
               paddingAngle={1}
               stroke={PALETTE.paper}
               strokeWidth={2}
+              onClick={handle}
+              style={{ cursor: handle ? 'pointer' : 'default' }}
             >
               {data.map((d, i) => (
-                <Cell key={i} fill={(colorMap && colorMap[d.key]) || SERIES[i % SERIES.length]} />
+                <Cell
+                  key={i}
+                  fill={(colorMap && colorMap[d.key]) || SERIES[i % SERIES.length]}
+                  fillOpacity={opacityFor(d.key)}
+                  stroke={selectedKeys.includes(d.key) ? PALETTE.ink : PALETTE.paper}
+                  strokeWidth={selectedKeys.includes(d.key) ? 2 : 2}
+                />
               ))}
             </Pie>
             <Tooltip
@@ -334,19 +389,36 @@ const Donut = ({ data, height = 280, colorMap }) => {
         </ResponsiveContainer>
       </div>
       <ul className="flex-1 space-y-1.5" style={{ fontFamily: FONT_BODY, fontSize: 12 }}>
-        {data.map((d, i) => (
-          <li key={i} className="flex items-baseline gap-2">
-            <span
-              className="mt-1.5 inline-block h-2 w-2 flex-none rounded-full"
-              style={{ background: (colorMap && colorMap[d.key]) || SERIES[i % SERIES.length] }}
-            />
-            <span style={{ color: PALETTE.charcoal }} className="flex-1">{d.label}</span>
-            <span style={{ fontFamily: FONT_MONO, color: PALETTE.ink, fontWeight: 500 }}>{fmtFull(d.value)}</span>
-            <span style={{ fontFamily: FONT_MONO, color: PALETTE.muted, fontSize: 10, width: 44 }} className="text-right">
-              {pct(d.value, total)}
-            </span>
-          </li>
-        ))}
+        {data.map((d, i) => {
+          const isSel = selectedKeys.includes(d.key);
+          return (
+            <li
+              key={i}
+              className="flex items-baseline gap-2"
+              style={{
+                cursor: handle ? 'pointer' : 'default',
+                opacity: opacityFor(d.key),
+              }}
+              onClick={handle ? () => handle(d) : undefined}
+            >
+              <span
+                className="mt-1.5 inline-block h-2 w-2 flex-none rounded-full"
+                style={{
+                  background: (colorMap && colorMap[d.key]) || SERIES[i % SERIES.length],
+                  outline: isSel ? `2px solid ${PALETTE.ink}` : 'none',
+                  outlineOffset: 1,
+                }}
+              />
+              <span style={{ color: PALETTE.charcoal, fontWeight: isSel ? 500 : 400 }} className="flex-1">
+                {d.label}
+              </span>
+              <span style={{ fontFamily: FONT_MONO, color: PALETTE.ink, fontWeight: 500 }}>{fmtFull(d.value)}</span>
+              <span style={{ fontFamily: FONT_MONO, color: PALETTE.muted, fontSize: 10, width: 44 }} className="text-right">
+                {pct(d.value, total)}
+              </span>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -375,25 +447,126 @@ const StatCard = ({ kicker, value, sub, accent, loading }) => (
   </Card>
 );
 
-// ---------- Main component ----------
+// Filter pills row. Renders one chip per active filter and a Clear all link.
+const FilterBreadcrumb = ({ filters, onRemove, onClear }) => {
+  const all = Object.entries(filters).flatMap(([dim, items]) =>
+    (items || []).map((item) => ({ dim, ...item }))
+  );
+  const active = all.length > 0;
+  return (
+    <div
+      className="mt-4 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2.5"
+      style={{
+        borderColor: active ? PALETTE.ink : PALETTE.rule,
+        background: active ? PALETTE.cream : 'transparent',
+        borderStyle: active ? 'solid' : 'dashed',
+      }}
+    >
+      <span
+        style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.2em' }}
+        className="uppercase"
+      >
+        {active ? 'Filtering by' : 'No filters · click any bar or slice to focus'}
+      </span>
+      {all.map((f) => {
+        const def = DIMENSIONS[f.dim];
+        return (
+          <button
+            key={`${f.dim}::${f.value}`}
+            onClick={() => onRemove(f.dim, f.value)}
+            className="group flex items-center gap-2 rounded-sm px-2 py-1 transition-colors"
+            style={{
+              background: PALETTE.ink,
+              color: PALETTE.cream,
+              fontFamily: FONT_BODY,
+              fontSize: 12,
+              maxWidth: 320,
+            }}
+            title="Remove this filter"
+          >
+            <span
+              style={{ fontFamily: FONT_MONO, fontSize: 9, opacity: 0.55, letterSpacing: '0.1em' }}
+              className="uppercase"
+            >
+              {def?.label || f.dim}
+            </span>
+            <span className="truncate">{f.label}</span>
+            <X size={12} className="flex-none opacity-60 group-hover:opacity-100" />
+          </button>
+        );
+      })}
+      {active && (
+        <button
+          onClick={onClear}
+          className="ml-1"
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 11,
+            color: PALETTE.burgundy,
+            textDecoration: 'underline',
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+          }}
+        >
+          Clear all
+        </button>
+      )}
+    </div>
+  );
+};
 
 export default function ThailandResearchDashboard() {
   useFonts();
 
   const [year, setYear] = useState(2025);
   const [refreshKey, setRefreshKey] = useState(0);
-
-  // Granular state per panel so failures don't block siblings
+  const [filters, setFilters] = useState({}); // { dim: [{ value, label }] }
   const [state, setState] = useState({});
 
-  const setPanel = (key, patch) =>
-    setState((s) => ({ ...s, [key]: { ...(s[key] || {}), ...patch } }));
+  const toggleFilter = (dim, item) => {
+    setFilters((prev) => {
+      const current = prev[dim] || [];
+      const exists = current.find((c) => c.value === item.value);
+      const nextList = exists
+        ? current.filter((c) => c.value !== item.value)
+        : [...current, item];
+      const next = { ...prev };
+      if (nextList.length === 0) delete next[dim];
+      else next[dim] = nextList;
+      return next;
+    });
+  };
+
+  const removeFilter = (dim, value) => {
+    setFilters((prev) => {
+      const nextList = (prev[dim] || []).filter((c) => c.value !== value);
+      const next = { ...prev };
+      if (nextList.length === 0) delete next[dim];
+      else next[dim] = nextList;
+      return next;
+    });
+  };
+
+  const clearFilters = () => setFilters({});
+
+  const filterStrings = useMemo(() => {
+    const m = { all: buildFilterString(year, filters) };
+    Object.keys(DIMENSIONS).forEach((d) => {
+      m[d] = buildFilterString(year, filters, d);
+    });
+    return m;
+  }, [year, filters]);
 
   useEffect(() => {
     let cancelled = false;
+    const setPanel = (key, patch) => {
+      if (cancelled) return;
+      setState((s) => ({ ...s, [key]: { ...(s[key] || {}), ...patch } }));
+    };
 
     const run = async (key, url, transform) => {
-      setPanel(key, { status: 'loading', error: null, data: null });
+      setPanel(key, { status: 'loading', error: null });
       try {
         const json = await fetchJson(url);
         if (cancelled) return;
@@ -405,38 +578,43 @@ export default function ThailandResearchDashboard() {
       }
     };
 
-    // Total
-    run('total', countUrl(year), (j) => j?.meta?.count ?? 0);
+    run('total', countUrl(filterStrings.all), (j) => j?.meta?.count ?? 0);
+    run('oaCount', countUrl(filterStrings.all, 'is_oa:true'), (j) => j?.meta?.count ?? 0);
+    run('intlCount', countUrl(filterStrings.all, 'countries_distinct_count:>1'), (j) => j?.meta?.count ?? 0);
 
-    // Open access slice
-    run('oaCount', countUrl(year, 'is_oa:true'), (j) => j?.meta?.count ?? 0);
+    run('topWorks', topWorksUrl(filterStrings.all), (j) =>
+      (j.results || []).map((w) => ({
+        id: w.id,
+        doi: w.doi,
+        title: w.title || 'Untitled',
+        cites: w.cited_by_count || 0,
+        type: TYPE_NAMES[w.type] || w.type || '—',
+        venue: w.primary_location?.source?.display_name || '—',
+        oa: w.open_access?.is_oa,
+        firstAuthor:
+          (w.authorships || []).find((a) => a.author_position === 'first')?.author?.display_name ||
+          (w.authorships || [])[0]?.author?.display_name ||
+          '—',
+      }))
+    );
 
-    // International collaboration slice (works that include >1 country)
-    // We approximate as: total minus works with only TH on authorship countries.
-    // Simpler approach: count works that have any non-TH country.
-    // OpenAlex doesn't directly support "not equal" on multi-valued fields easily,
-    // so we derive from group-by collaborators below.
-
-    // Document types
-    run('docTypes', groupUrl(year, 'type'), (j) =>
+    run('docTypes', groupUrl(filterStrings.docTypes, 'type'), (j) =>
       (j.group_by || []).map((g) => ({
         key: g.key,
         label: TYPE_NAMES[g.key] || g.key_display_name || g.key,
         value: g.count,
-      })).filter(d => d.value > 0)
+      })).filter((d) => d.value > 0)
     );
 
-    // OA status (gold/green/hybrid/bronze/closed/diamond)
-    run('oaStatus', groupUrl(year, 'open_access.oa_status'), (j) =>
+    run('oaStatus', groupUrl(filterStrings.oaStatus, 'open_access.oa_status'), (j) =>
       (j.group_by || []).map((g) => ({
         key: g.key,
         label: g.key.charAt(0).toUpperCase() + g.key.slice(1),
         value: g.count,
-      })).filter(d => d.value > 0)
+      })).filter((d) => d.value > 0)
     );
 
-    // Languages
-    run('languages', groupUrl(year, 'language'), (j) =>
+    run('languages', groupUrl(filterStrings.languages, 'language'), (j) =>
       (j.group_by || [])
         .map((g) => ({
           key: g.key,
@@ -447,62 +625,54 @@ export default function ThailandResearchDashboard() {
         .slice(0, 8)
     );
 
-    // Fields (broad disciplines, ~26 across OpenAlex)
-    run('fields', groupUrl(year, 'primary_topic.field.id'), (j) =>
+    run('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
       (j.group_by || [])
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 32), value: g.count }))
         .filter((d) => d.value > 0)
         .slice(0, 14)
     );
 
-    // Subfields (granular disciplines)
-    run('subfields', groupUrl(year, 'primary_topic.subfield.id'), (j) =>
+    run('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
       (j.group_by || [])
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
         .filter((d) => d.value > 0)
         .slice(0, 12)
     );
 
-    // Publishers
-    run('publishers', groupUrl(year, 'primary_location.source.host_organization'), (j) =>
+    run('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
       (j.group_by || [])
         .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 36), value: g.count }))
         .slice(0, 12)
     );
 
-    // International collaborators (countries on the work other than TH)
-    run('collaborators', groupUrl(year, 'authorships.countries'), (j) => {
+    run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
-      const filtered = all
+      return all
         .filter((g) => g.key && g.key !== 'TH' && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: countryName(g.key), value: g.count }))
         .slice(0, 14);
-      return filtered;
     });
 
-    // SDGs
-    run('sdgs', groupUrl(year, 'sustainable_development_goals.id'), (j) => {
-      const arr = (j.group_by || [])
+    run('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
+      (j.group_by || [])
         .map((g) => {
           const num = (g.key || '').match(/\/(\d+)$/)?.[1];
           const label = num ? `SDG ${num} · ${g.key_display_name}` : g.key_display_name;
           return { key: g.key, label: cleanLabel(label, 42), value: g.count };
         })
-        .filter((d) => d.value > 0);
-      return arr.slice(0, 14);
-    });
+        .filter((d) => d.value > 0)
+        .slice(0, 14)
+    );
 
-    // Funders
-    run('funders', groupUrl(year, 'grants.funder'), (j) =>
+    run('funders', groupUrl(filterStrings.funders, 'grants.funder'), (j) =>
       (j.group_by || [])
         .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
         .slice(0, 12)
     );
 
-    // Institutions: group_by then filter to Thai by metadata batch lookup
-    run('institutions', groupUrl(year, 'authorships.institutions.id'), async (j) => {
+    run('institutions', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), async (j) => {
       const top = (j.group_by || []).slice(0, 60);
       if (top.length === 0) return [];
       const ids = top.map((g) => stripPrefix(g.key));
@@ -527,69 +697,21 @@ export default function ThailandResearchDashboard() {
         .slice(0, 15);
     });
 
-    // Top cited works
-    run('topWorks', topWorksUrl(year), (j) =>
-      (j.results || []).map((w) => ({
-        id: w.id,
-        doi: w.doi,
-        title: w.title || 'Untitled',
-        cites: w.cited_by_count || 0,
-        type: TYPE_NAMES[w.type] || w.type || '—',
-        venue: w.primary_location?.source?.display_name || '—',
-        oa: w.open_access?.is_oa,
-        firstAuthor:
-          (w.authorships || []).find((a) => a.author_position === 'first')?.author?.display_name ||
-          (w.authorships || [])[0]?.author?.display_name ||
-          '—',
-        thAffil: (w.authorships || []).some((a) =>
-          (a.institutions || []).some((i) => i.country_code === 'TH')
-        ),
-      }))
-    );
+    return () => { cancelled = true; };
+  }, [year, refreshKey, filterStrings]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [year, refreshKey]);
+  const selKeys = (dim) => (filters[dim] || []).map((f) => f.value);
 
-  // Derived metrics
+  const onPick = (dim) => (entry) => {
+    if (!entry || !entry.key) return;
+    toggleFilter(dim, { value: entry.key, label: entry.label });
+  };
+
   const totalCount = state.total?.data;
   const oaCount = state.oaCount?.data;
-  const collabSum = useMemo(() => {
-    const arr = state.collaborators?.data;
-    if (!arr) return null;
-    // Approximate count of works with international co-authorship by max non-TH count.
-    // The proper number is the count of works where any country != TH appears.
-    // Recharts data already gives this; we use the largest single country as a lower bound, but
-    // the true number is bounded above by sum and below by max. We surface a separate query for accuracy.
-    return null;
-  }, [state.collaborators]);
-
-  // Separate true count for international collaboration
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        // Works with at least one TH author AND at least one author from another country.
-        // OpenAlex supports: institutions_distinct_count > 1 alongside TH filter, but the cleanest
-        // proxy is is_authors_truncated + countries_distinct_count > 1. We use countries_distinct_count.
-        const url = `${OPENALEX_BASE}/works?filter=${baseFilter(year)},countries_distinct_count:>1&per-page=1`;
-        setPanel('intlCount', { status: 'loading' });
-        const j = await fetchJson(url);
-        if (cancelled) return;
-        setPanel('intlCount', { status: 'ready', data: j?.meta?.count ?? 0 });
-      } catch (e) {
-        if (cancelled) return;
-        setPanel('intlCount', { status: 'error', error: e.message });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [year, refreshKey]);
-
   const intlCount = state.intlCount?.data;
-
   const topInstitution = state.institutions?.data?.[0];
-  const topField = state.fields?.data?.[0];
+  const filterCount = Object.values(filters).reduce((s, arr) => s + (arr?.length || 0), 0);
 
   return (
     <div
@@ -600,11 +722,7 @@ export default function ThailandResearchDashboard() {
         fontFamily: FONT_BODY,
       }}
     >
-      {/* Editorial header */}
-      <header
-        className="border-b"
-        style={{ borderColor: PALETTE.ink, background: PALETTE.paper }}
-      >
+      <header className="border-b" style={{ borderColor: PALETTE.ink, background: PALETTE.paper }}>
         <div className="mx-auto max-w-[1400px] px-6 pt-6 pb-5">
           <div className="flex items-center justify-between gap-4">
             <div
@@ -626,7 +744,6 @@ export default function ThailandResearchDashboard() {
                 style={{
                   fontFamily: FONT_DISPLAY,
                   fontWeight: 500,
-                  fontStyle: 'normal',
                   fontSize: 'clamp(36px, 4.6vw, 60px)',
                   lineHeight: 0.98,
                   letterSpacing: '-0.018em',
@@ -640,7 +757,8 @@ export default function ThailandResearchDashboard() {
                 style={{ fontFamily: FONT_BODY, fontSize: 14, color: PALETTE.charcoal, lineHeight: 1.55 }}
               >
                 A live, policy-oriented breakdown of scholarly works with at least one Thai institutional affiliation,
-                drawn from the OpenAlex knowledge graph. Counts update as publishers deposit new metadata; treat 2025 as still ripening.
+                drawn from the OpenAlex knowledge graph. Click any bar or slice to focus the entire dashboard;
+                click again to release. Multiple filters compose with AND across dimensions and OR within them.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -671,44 +789,36 @@ export default function ThailandResearchDashboard() {
                   fontSize: 12,
                   background: 'transparent',
                 }}
-                aria-label="Refresh"
               >
                 <RefreshCw size={13} />
                 <span>Refresh</span>
               </button>
             </div>
           </div>
+
+          <FilterBreadcrumb filters={filters} onRemove={removeFilter} onClear={clearFilters} />
         </div>
       </header>
 
-      {/* Stat strip */}
       <section className="mx-auto max-w-[1400px] px-6 pt-6">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <StatCard
-            kicker="Total works · TH affiliated"
+            kicker={filterCount ? 'Filtered works' : 'Total works · TH affiliated'}
             value={totalCount != null ? fmtFull(totalCount) : '—'}
-            sub={`Records in OpenAlex with ≥1 author at a Thai institution in ${year}.`}
+            sub={`Records in OpenAlex matching the active selection in ${year}.`}
             accent={PALETTE.ink}
             loading={state.total?.status === 'loading'}
           />
           <StatCard
             kicker="Open access share"
-            value={
-              totalCount && oaCount != null
-                ? pct(oaCount, totalCount)
-                : '—'
-            }
+            value={totalCount && oaCount != null ? pct(oaCount, totalCount) : '—'}
             sub={oaCount != null && totalCount ? `${fmtFull(oaCount)} of ${fmtFull(totalCount)} works are openly readable.` : 'Loading slice…'}
             accent={PALETTE.gold}
             loading={state.oaCount?.status === 'loading' || state.total?.status === 'loading'}
           />
           <StatCard
             kicker="International co-authorship"
-            value={
-              totalCount && intlCount != null
-                ? pct(intlCount, totalCount)
-                : '—'
-            }
+            value={totalCount && intlCount != null ? pct(intlCount, totalCount) : '—'}
             sub={intlCount != null && totalCount ? `${fmtFull(intlCount)} works include ≥2 country affiliations.` : 'Loading slice…'}
             accent={PALETTE.teal}
             loading={state.intlCount?.status === 'loading' || state.total?.status === 'loading'}
@@ -722,34 +832,38 @@ export default function ThailandResearchDashboard() {
                 </span>
               ) : '—'
             }
-            sub={topInstitution ? `${fmtFull(topInstitution.value)} works · ${pct(topInstitution.value, totalCount || 0)} of national output` : 'Loading…'}
+            sub={topInstitution ? `${fmtFull(topInstitution.value)} works · ${pct(topInstitution.value, totalCount || 0)} of current selection` : 'Loading…'}
             accent={PALETTE.burgundy}
             loading={state.institutions?.status === 'loading'}
           />
         </div>
       </section>
 
-      {/* Main grid */}
       <main className="mx-auto max-w-[1400px] px-6 py-8">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          {/* Institutions */}
           <Card className="p-5 lg:col-span-7">
             <SectionTitle
               icon={Building2}
               kicker="Producing institutions"
               title="Where the research happens"
-              hint="Top 15 Thai institutions by works count"
+              hint="Top 15 Thai institutions · click to filter"
             />
             <ChartFrame
               status={state.institutions?.status}
               error={state.institutions?.error}
-              hint="Filtered to institutions with country_code = TH after group-by lookup."
+              hint="Filtered to country_code = TH after group-by lookup."
             >
-              <HBar data={state.institutions?.data || []} height={420} color={PALETTE.navy} accentTop />
+              <HBar
+                data={state.institutions?.data || []}
+                height={420}
+                color={PALETTE.navy}
+                accentTop
+                onBarClick={onPick('institutions')}
+                selectedKeys={selKeys('institutions')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Fields */}
           <Card className="p-5 lg:col-span-5">
             <SectionTitle
               icon={Layers}
@@ -758,23 +872,28 @@ export default function ThailandResearchDashboard() {
               hint="OpenAlex primary_topic.field"
             />
             <ChartFrame status={state.fields?.status} error={state.fields?.error}>
-              <HBar data={state.fields?.data || []} height={420} color={PALETTE.burgundy} />
+              <HBar
+                data={state.fields?.data || []}
+                height={420}
+                color={PALETTE.burgundy}
+                onBarClick={onPick('fields')}
+                selectedKeys={selKeys('fields')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Document types */}
           <Card className="p-5 lg:col-span-4">
-            <SectionTitle
-              icon={FileText}
-              kicker="Output forms"
-              title="Document types"
-            />
+            <SectionTitle icon={FileText} kicker="Output forms" title="Document types" />
             <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
-              <Donut data={(state.docTypes?.data || []).slice(0, 7)} height={260} />
+              <Donut
+                data={(state.docTypes?.data || []).slice(0, 7)}
+                height={260}
+                onSliceClick={onPick('docTypes')}
+                selectedKeys={selKeys('docTypes')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* OA Status */}
           <Card className="p-5 lg:col-span-4">
             <SectionTitle
               icon={BookOpen}
@@ -783,23 +902,28 @@ export default function ThailandResearchDashboard() {
               hint="Gold · Green · Hybrid · Bronze · Closed"
             />
             <ChartFrame status={state.oaStatus?.status} error={state.oaStatus?.error}>
-              <Donut data={state.oaStatus?.data || []} height={260} colorMap={OA_COLORS} />
+              <Donut
+                data={state.oaStatus?.data || []}
+                height={260}
+                colorMap={OA_COLORS}
+                onSliceClick={onPick('oaStatus')}
+                selectedKeys={selKeys('oaStatus')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Languages */}
           <Card className="p-5 lg:col-span-4">
-            <SectionTitle
-              icon={Languages}
-              kicker="Language of record"
-              title="Publication languages"
-            />
+            <SectionTitle icon={Languages} kicker="Language of record" title="Publication languages" />
             <ChartFrame status={state.languages?.status} error={state.languages?.error}>
-              <Donut data={state.languages?.data || []} height={260} />
+              <Donut
+                data={state.languages?.data || []}
+                height={260}
+                onSliceClick={onPick('languages')}
+                selectedKeys={selKeys('languages')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Publishers */}
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Newspaper}
@@ -808,11 +932,16 @@ export default function ThailandResearchDashboard() {
               hint="Host organisation of the primary location"
             />
             <ChartFrame status={state.publishers?.status} error={state.publishers?.error}>
-              <HBar data={state.publishers?.data || []} height={380} color={PALETTE.teal} />
+              <HBar
+                data={state.publishers?.data || []}
+                height={380}
+                color={PALETTE.teal}
+                onBarClick={onPick('publishers')}
+                selectedKeys={selKeys('publishers')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Subfields */}
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Sparkles}
@@ -821,11 +950,16 @@ export default function ThailandResearchDashboard() {
               hint="OpenAlex primary_topic.subfield"
             />
             <ChartFrame status={state.subfields?.status} error={state.subfields?.error}>
-              <HBar data={state.subfields?.data || []} height={380} color={PALETTE.forest} />
+              <HBar
+                data={state.subfields?.data || []}
+                height={380}
+                color={PALETTE.forest}
+                onBarClick={onPick('subfields')}
+                selectedKeys={selKeys('subfields')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Collaborators */}
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Globe2}
@@ -838,11 +972,16 @@ export default function ThailandResearchDashboard() {
               error={state.collaborators?.error}
               hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
             >
-              <HBar data={state.collaborators?.data || []} height={420} color={PALETTE.plum} />
+              <HBar
+                data={state.collaborators?.data || []}
+                height={420}
+                color={PALETTE.plum}
+                onBarClick={onPick('collaborators')}
+                selectedKeys={selKeys('collaborators')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* SDGs */}
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Target}
@@ -851,11 +990,16 @@ export default function ThailandResearchDashboard() {
               hint="OpenAlex SDG classifier"
             />
             <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
-              <HBar data={state.sdgs?.data || []} height={420} color={PALETTE.gold} />
+              <HBar
+                data={state.sdgs?.data || []}
+                height={420}
+                color={PALETTE.gold}
+                onBarClick={onPick('sdgs')}
+                selectedKeys={selKeys('sdgs')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Funders */}
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Banknote}
@@ -866,18 +1010,23 @@ export default function ThailandResearchDashboard() {
             <ChartFrame
               status={state.funders?.status}
               error={state.funders?.error}
-              hint="Many works lack funder metadata in Crossref; absence in this list does not mean absence of funding."
+              hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
             >
-              <HBar data={state.funders?.data || []} height={380} color={PALETTE.rust} />
+              <HBar
+                data={state.funders?.data || []}
+                height={380}
+                color={PALETTE.rust}
+                onBarClick={onPick('funders')}
+                selectedKeys={selKeys('funders')}
+              />
             </ChartFrame>
           </Card>
 
-          {/* Top cited works */}
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={TrendingUp}
               kicker="Visibility"
-              title="Most-cited works of the year"
+              title="Most-cited works in selection"
               hint="Live ranking; very recent works under-cite"
             />
             <ChartFrame status={state.topWorks?.status} error={state.topWorks?.error}>
@@ -886,12 +1035,8 @@ export default function ThailandResearchDashboard() {
                   <li key={w.id} className="flex gap-3 border-b pb-3 last:border-b-0" style={{ borderColor: PALETTE.rule }}>
                     <div
                       style={{
-                        fontFamily: FONT_DISPLAY,
-                        fontStyle: 'italic',
-                        color: PALETTE.burgundy,
-                        fontSize: 22,
-                        lineHeight: 1,
-                        width: 32,
+                        fontFamily: FONT_DISPLAY, fontStyle: 'italic', color: PALETTE.burgundy,
+                        fontSize: 22, lineHeight: 1, width: 32,
                       }}
                     >
                       {i + 1}
@@ -902,12 +1047,8 @@ export default function ThailandResearchDashboard() {
                         target="_blank"
                         rel="noreferrer noopener"
                         style={{
-                          fontFamily: FONT_DISPLAY,
-                          fontWeight: 500,
-                          color: PALETTE.ink,
-                          fontSize: 14,
-                          lineHeight: 1.3,
-                          textDecoration: 'none',
+                          fontFamily: FONT_DISPLAY, fontWeight: 500, color: PALETTE.ink,
+                          fontSize: 14, lineHeight: 1.3, textDecoration: 'none',
                         }}
                         className="block hover:underline"
                       >
@@ -925,11 +1066,8 @@ export default function ThailandResearchDashboard() {
                         {w.oa && (
                           <span
                             style={{
-                              fontFamily: FONT_MONO,
-                              background: PALETTE.gold,
-                              color: PALETTE.paper,
-                              padding: '1px 6px',
-                              fontSize: 9,
+                              fontFamily: FONT_MONO, background: PALETTE.gold,
+                              color: PALETTE.paper, padding: '1px 6px', fontSize: 9,
                               letterSpacing: '0.08em',
                             }}
                           >
@@ -940,11 +1078,8 @@ export default function ThailandResearchDashboard() {
                     </div>
                     <div
                       style={{
-                        fontFamily: FONT_MONO,
-                        color: PALETTE.ink,
-                        fontSize: 13,
-                        fontWeight: 600,
-                        whiteSpace: 'nowrap',
+                        fontFamily: FONT_MONO, color: PALETTE.ink, fontSize: 13,
+                        fontWeight: 600, whiteSpace: 'nowrap',
                       }}
                       className="text-right"
                     >
@@ -960,13 +1095,8 @@ export default function ThailandResearchDashboard() {
           </Card>
         </div>
 
-        {/* Methods note */}
         <Card className="mt-6 p-6">
-          <SectionTitle
-            icon={Database}
-            kicker="Methods & caveats"
-            title="On reading these numbers"
-          />
+          <SectionTitle icon={Database} kicker="Methods & caveats" title="On reading these numbers" />
           <div
             className="grid grid-cols-1 gap-5 md:grid-cols-3"
             style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.charcoal, lineHeight: 1.6 }}
@@ -975,35 +1105,27 @@ export default function ThailandResearchDashboard() {
               <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase mb-1.5">Source</div>
               All counts come from the OpenAlex Works API filtered by{' '}
               <code style={{ fontFamily: FONT_MONO, background: PALETTE.cream, padding: '1px 4px' }}>authorships.institutions.country_code:TH</code>{' '}
-              and the selected publication year. SDG and topic tags use OpenAlex’s in-house classifiers; topic taxonomy is hierarchical (domain → field → subfield → topic).
+              and the active selection. SDG and topic tags use OpenAlex’s in-house classifiers; topic taxonomy is hierarchical (domain → field → subfield → topic).
+            </div>
+            <div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase mb-1.5">Cross-filtering</div>
+              Each chart computes its breakdown with all <em>other</em> active filters applied, but ignores its own dimension. That is why the Institutions chart still shows many bars after you click one. Across dimensions filters are AND; within one dimension, OR.
             </div>
             <div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase mb-1.5">2025 caveat</div>
-              The current year is still being indexed. Crossref deposits and OpenAlex affiliation parsing continue for months after the calendar year ends. OpenAlex has reported reduced affiliation metadata coverage for 2025 articles, particularly from some commercial publishers, so the absolute count is conservative.
-            </div>
-            <div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase mb-1.5">Cross-checks</div>
-              For institutional reporting, triangulate against Scopus (<code style={{ fontFamily: FONT_MONO }}>AFFILCOUNTRY(Thailand) AND PUBYEAR IS {year}</code>), Web of Science, and Dimensions. Differences between sources reflect coverage and affiliation-parsing rules, not errors.
+              The current year is still being indexed. OpenAlex has reported reduced affiliation metadata coverage for some 2025 articles, particularly from commercial publishers, so the absolute count is conservative. Triangulate against Scopus, Web of Science, and Dimensions.
             </div>
           </div>
         </Card>
       </main>
 
-      {/* Footer */}
-      <footer
-        className="border-t"
-        style={{ borderColor: PALETTE.rule, background: PALETTE.paper }}
-      >
+      <footer className="border-t" style={{ borderColor: PALETTE.rule, background: PALETTE.paper }}>
         <div
           className="mx-auto flex max-w-[1400px] flex-col items-start justify-between gap-2 px-6 py-5 md:flex-row md:items-center"
           style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.12em' }}
         >
-          <div className="uppercase">
-            Data · OpenAlex.org (CC0) · openalex.org/works
-          </div>
-          <div className="uppercase">
-            Live API · No caching · Counts may shift between loads
-          </div>
+          <div className="uppercase">Data · OpenAlex.org (CC0) · openalex.org/works</div>
+          <div className="uppercase">Live API · No caching · Counts may shift between loads</div>
         </div>
       </footer>
     </div>
