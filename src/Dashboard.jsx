@@ -1680,7 +1680,7 @@ export default function ResearchOutputDashboard() {
               icon={Building2}
               kicker="Producing institutions"
               title="Where the research happens"
-              hint="Top Thai institutions · click to filter"
+              hint={`Top ${countryName(country)} institutions · click to filter`}
             />
             <ChartFrame
               status={state.institutions?.status}
@@ -1793,7 +1793,7 @@ export default function ResearchOutputDashboard() {
             <SectionTitle
               icon={Newspaper}
               kicker="Publishing channels"
-              title="Top publishers carrying Thai output"
+              title={`Top publishers carrying ${countryName(country)} output`}
               hint="Host organisation of the primary location"
             />
             <ChartFrame status={state.publishers?.status} error={state.publishers?.error}>
