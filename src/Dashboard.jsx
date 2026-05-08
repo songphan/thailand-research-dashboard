@@ -14,7 +14,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // Set this to your email to enter the OpenAlex "polite pool" (100k req/day, far higher
 // per-second limits). Leave as empty string to remain anonymous (10 req/sec, you may see
 // 429 errors when many panels load at once). Either an institutional or personal address works.
-const OPENALEX_EMAIL = 'songphan.c@chula.ac.th';
+const OPENALEX_EMAIL = 'your.email@chula.ac.th';
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -803,8 +803,15 @@ const ChartControls = ({
   );
 };
 
-// Modal table: searchable, sortable, exportable. Used for "View all" on any chart.
-const TableModal = ({ open, onClose, title, kicker, data }) => {
+// Modal table: searchable, sortable, exportable, and click-to-filter. The filter
+// pattern matches the chart bars: clicking a row toggles that label as a filter
+// in the parent dashboard, and the breadcrumb at the top of the page reflects the
+// change in real time. When a row is selected its checkbox fills in and a chip
+// counter appears in the footer for one-click "clear all in this dimension".
+const TableModal = ({
+  open, onClose, title, kicker, data,
+  filterable = false, selectedKeys = [], onToggleFilter, onClearAllInDim,
+}) => {
   const [search, setSearch] = useState('');
   const [sortDir, setSortDir] = useState('desc'); // 'asc' or 'desc' on works
   const [sortBy, setSortBy] = useState('value'); // 'rank' | 'label' | 'value'
@@ -843,6 +850,13 @@ const TableModal = ({ open, onClose, title, kicker, data }) => {
 
   const arrow = (col) => sortBy === col ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
 
+  const isSelected = (key) => selectedKeys.includes(key);
+  const selectedInDim = selectedKeys.length;
+  const handleRowClick = (d) => {
+    if (!filterable || !onToggleFilter || !d.key) return;
+    onToggleFilter({ value: d.key, label: d.label });
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -873,6 +887,12 @@ const TableModal = ({ open, onClose, title, kicker, data }) => {
             </h3>
             <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }} className="mt-1">
               {sorted.length.toLocaleString()} of {(data || []).length.toLocaleString()} rows · {fmtFull(total)} total works
+              {filterable && selectedInDim > 0 && (
+                <span style={{ color: PALETTE.burgundy }}>
+                  {' · '}
+                  {selectedInDim} selected
+                </span>
+              )}
             </div>
           </div>
           <button
@@ -921,6 +941,15 @@ const TableModal = ({ open, onClose, title, kicker, data }) => {
               }}
             >
               <tr>
+                {filterable && (
+                  <th
+                    className="px-3 py-2.5 text-center"
+                    style={{ width: 36, fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.16em', color: PALETTE.muted }}
+                    title="Filter selection"
+                  >
+                    ▢
+                  </th>
+                )}
                 <th
                   onClick={() => toggleSort('rank')}
                   className="px-5 py-2.5 text-left"
@@ -951,29 +980,66 @@ const TableModal = ({ open, onClose, title, kicker, data }) => {
               </tr>
             </thead>
             <tbody>
-              {sorted.map((d, i) => (
-                <tr
-                  key={d.key || i}
-                  style={{
-                    borderBottom: `1px solid ${PALETTE.rule}`,
-                  }}
-                  className="hover:bg-[var(--cream)]"
-                >
-                  <td className="px-5 py-2" style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
-                    {i + 1}
-                  </td>
-                  <td className="px-3 py-2" style={{ color: PALETTE.charcoal }}>{d.label}</td>
-                  <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
-                    {fmtFull(d.value)}
-                  </td>
-                  <td className="px-5 py-2 text-right" style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
-                    {pct(d.value, total)}
-                  </td>
-                </tr>
-              ))}
+              {sorted.map((d, i) => {
+                const sel = isSelected(d.key);
+                const rowStyle = {
+                  borderBottom: `1px solid ${PALETTE.rule}`,
+                  background: sel ? 'rgba(122,46,62,0.07)' : 'transparent',
+                  cursor: filterable ? 'pointer' : 'default',
+                };
+                return (
+                  <tr
+                    key={d.key || i}
+                    style={rowStyle}
+                    onClick={() => handleRowClick(d)}
+                    onMouseEnter={(e) => {
+                      if (!sel) e.currentTarget.style.background = PALETTE.cream;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = sel ? 'rgba(122,46,62,0.07)' : 'transparent';
+                    }}
+                    title={filterable ? (sel ? 'Click to remove filter' : 'Click to filter dashboard by this row') : undefined}
+                  >
+                    {filterable && (
+                      <td className="px-3 py-2 text-center">
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: 16, height: 16,
+                            border: `1.5px solid ${sel ? PALETTE.burgundy : PALETTE.rule}`,
+                            background: sel ? PALETTE.burgundy : 'transparent',
+                            color: PALETTE.cream,
+                            fontSize: 10,
+                            lineHeight: 1,
+                            borderRadius: 2,
+                            fontFamily: FONT_MONO,
+                          }}
+                        >
+                          {sel ? '✓' : ''}
+                        </span>
+                      </td>
+                    )}
+                    <td className="px-5 py-2" style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
+                      {i + 1}
+                    </td>
+                    <td className="px-3 py-2" style={{ color: sel ? PALETTE.ink : PALETTE.charcoal, fontWeight: sel ? 500 : 400 }}>
+                      {d.label}
+                    </td>
+                    <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
+                      {fmtFull(d.value)}
+                    </td>
+                    <td className="px-5 py-2 text-right" style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
+                      {pct(d.value, total)}
+                    </td>
+                  </tr>
+                );
+              })}
               {sorted.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="px-5 py-10 text-center" style={{ color: PALETTE.muted }}>
+                  <td colSpan={filterable ? 5 : 4} className="px-5 py-10 text-center" style={{ color: PALETTE.muted }}>
                     No rows match your filter.
                   </td>
                 </tr>
@@ -983,10 +1049,30 @@ const TableModal = ({ open, onClose, title, kicker, data }) => {
         </div>
 
         <footer
-          className="border-t px-5 py-3"
+          className="flex flex-wrap items-center justify-between gap-2 border-t px-5 py-3"
           style={{ borderColor: PALETTE.rule, fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }}
         >
-          <span className="uppercase">Esc to close · Click headers to sort · Search filters in place</span>
+          <span className="uppercase">
+            {filterable ? 'Click row to filter · Esc to close · Headers sort' : 'Esc to close · Click headers to sort · Search filters in place'}
+          </span>
+          {filterable && selectedInDim > 0 && onClearAllInDim && (
+            <button
+              onClick={onClearAllInDim}
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                color: PALETTE.burgundy,
+                textDecoration: 'underline',
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                letterSpacing: '0.1em',
+              }}
+              className="uppercase"
+            >
+              Clear {selectedInDim} in this dimension
+            </button>
+          )}
         </footer>
       </div>
     </div>
@@ -2258,6 +2344,20 @@ export default function ResearchOutputDashboard() {
         title={tableOpenDim ? (DIMENSIONS[tableOpenDim]?.label || tableOpenDim) : ''}
         kicker="Full data · sortable · exportable"
         data={tableOpenDim ? (state[tableOpenDim]?.data || []) : []}
+        filterable={tableOpenDim ? !!DIMENSIONS[tableOpenDim]?.filterable : false}
+        selectedKeys={tableOpenDim ? selKeys(tableOpenDim) : []}
+        onToggleFilter={tableOpenDim && DIMENSIONS[tableOpenDim]?.filterable
+          ? (item) => toggleFilter(tableOpenDim, item)
+          : undefined}
+        onClearAllInDim={tableOpenDim
+          ? () => {
+              setFilters((prev) => {
+                const next = { ...prev };
+                delete next[tableOpenDim];
+                return next;
+              });
+            }
+          : undefined}
       />
     </div>
   );
