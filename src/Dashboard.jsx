@@ -1321,6 +1321,10 @@ export default function ResearchOutputDashboard() {
     run('total', countUrl(filterStrings.all), (j) => j?.meta?.count ?? 0);
     run('oaCount', countUrl(filterStrings.all, 'is_oa:true'), (j) => j?.meta?.count ?? 0);
     run('intlCount', countUrl(filterStrings.all, 'countries_distinct_count:>1'), (j) => j?.meta?.count ?? 0);
+    // Domestic-only: works whose author affiliations are all from a single country
+    // (the active country). We fetch the count and reuse it in the collaborators panel
+    // so users see the share of domestic-only output below the cross-border bar chart.
+    run('domesticCount', countUrl(filterStrings.all, 'countries_distinct_count:1'), (j) => j?.meta?.count ?? 0);
 
     // Outgoing citations: sum (refs * works) across the reference-count distribution.
     // OpenAlex doesn't expose a direct sum aggregation, so we group_by referenced_works_count
@@ -1404,8 +1408,15 @@ export default function ResearchOutputDashboard() {
     run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
       return all
-        .filter((g) => g.key && g.key !== country && g.key !== 'unknown')
-        .map((g) => ({ key: g.key, label: countryName(g.key), value: g.count }));
+        .map((g) => {
+          // OpenAlex returns either the bare ISO-2 code or a full URL
+          // like https://openalex.org/countries/TH. Normalise to the code.
+          const raw = g.key || '';
+          const m = raw.match(/\/countries\/([A-Z]{2})$/i);
+          const code = (m ? m[1] : raw).toUpperCase();
+          return { key: code, label: countryName(code), value: g.count, _rawKey: g.key };
+        })
+        .filter((g) => g.key && g.key !== country && g.key && g.key !== 'UNKNOWN' && g.key.length === 2);
     });
 
     run('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
@@ -1535,6 +1546,24 @@ export default function ResearchOutputDashboard() {
       }}
     >
       <header className="border-b" style={{ borderColor: PALETTE.ink, background: PALETTE.paper }}>
+        {/* OAR Chula logo strip */}
+        <div className="border-b" style={{ borderColor: PALETTE.rule }}>
+          <div className="mx-auto max-w-[1400px] px-6 py-3">
+            <a
+              href="https://www.car.chula.ac.th"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-block"
+              title="Office of Academic Resources, Chulalongkorn University"
+            >
+              <img
+                src="oar_logo.png"
+                alt="Office of Academic Resources, Chulalongkorn University"
+                style={{ height: 44, width: 'auto', display: 'block' }}
+              />
+            </a>
+          </div>
+        </div>
         <div className="mx-auto max-w-[1400px] px-6 pt-6 pb-5">
           <div className="flex items-center justify-between gap-4">
             <div
@@ -1675,7 +1704,7 @@ export default function ResearchOutputDashboard() {
 
       <main className="mx-auto max-w-[1400px] px-6 py-8">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-7">
+          <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={Building2}
               kicker="Producing institutions"
@@ -1703,7 +1732,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-5">
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Layers}
               kicker="Disciplinary mix"
@@ -1722,6 +1751,29 @@ export default function ResearchOutputDashboard() {
                 limit={limitFor('fields')}
                 onLimitChange={setLimit('fields')}
                 onOpenTable={() => setTableOpenDim('fields')}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Sparkles}
+              kicker="Granular topics"
+              title="Active subfields"
+              hint="OpenAlex primary_topic.subfield"
+            />
+            <ChartFrame status={state.subfields?.status} error={state.subfields?.error}>
+              <HBar
+                data={sliceFor('subfields')}
+                color={PALETTE.forest}
+                onBarClick={onPick('subfields')}
+                selectedKeys={selKeys('subfields')}
+              />
+              <ChartControls
+                total={(state.subfields?.data || []).length}
+                limit={limitFor('subfields')}
+                onLimitChange={setLimit('subfields')}
+                onOpenTable={() => setTableOpenDim('subfields')}
               />
             </ChartFrame>
           </Card>
@@ -1814,33 +1866,10 @@ export default function ResearchOutputDashboard() {
 
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
-              icon={Sparkles}
-              kicker="Granular topics"
-              title="Active subfields"
-              hint="OpenAlex primary_topic.subfield"
-            />
-            <ChartFrame status={state.subfields?.status} error={state.subfields?.error}>
-              <HBar
-                data={sliceFor('subfields')}
-                color={PALETTE.forest}
-                onBarClick={onPick('subfields')}
-                selectedKeys={selKeys('subfields')}
-              />
-              <ChartControls
-                total={(state.subfields?.data || []).length}
-                limit={limitFor('subfields')}
-                onLimitChange={setLimit('subfields')}
-                onOpenTable={() => setTableOpenDim('subfields')}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
               icon={Globe2}
               kicker="Co-authorship reach"
               title="International collaborators"
-              hint={`Country counts on works with ≥1 ${country} author`}
+              hint={`${countryName(country)} excluded from list`}
             />
             <ChartFrame
               status={state.collaborators?.status}
@@ -1859,6 +1888,27 @@ export default function ResearchOutputDashboard() {
                 onLimitChange={setLimit('collaborators')}
                 onOpenTable={() => setTableOpenDim('collaborators')}
               />
+              {/* Domestic-collaboration summary */}
+              {state.domesticCount?.status === 'ready' && totalCount ? (
+                <div
+                  className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
+                  style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
+                >
+                  <span
+                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                    className="uppercase"
+                  >
+                    Domestic-only
+                  </span>
+                  <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+                    <strong style={{ color: PALETTE.ink, fontFamily: FONT_MONO }}>
+                      {fmtFull(state.domesticCount.data)}
+                    </strong>{' '}
+                    works ({pct(state.domesticCount.data, totalCount)}) involve {countryName(country)} authors only — no
+                    international co-authors.
+                  </span>
+                </div>
+              ) : null}
             </ChartFrame>
           </Card>
 
@@ -2156,12 +2206,49 @@ export default function ResearchOutputDashboard() {
       </main>
 
       <footer className="border-t" style={{ borderColor: PALETTE.rule, background: PALETTE.paper }}>
-        <div
-          className="mx-auto flex max-w-[1400px] flex-col items-start justify-between gap-2 px-6 py-5 md:flex-row md:items-center"
-          style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.12em' }}
-        >
-          <div className="uppercase">Data · OpenAlex.org (CC0) · openalex.org/works</div>
-          <div className="uppercase">Live API · No caching · Counts may shift between loads</div>
+        <div className="mx-auto max-w-[1400px] px-6 py-6">
+          {/* Acknowledgement row: prose, slightly larger and unstyled, before the meta strip */}
+          <div
+            className="flex flex-col gap-2 border-b pb-4 md:flex-row md:items-center md:justify-between"
+            style={{ borderColor: PALETTE.rule }}
+          >
+            <div
+              style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.55, maxWidth: 760 }}
+            >
+              Built by the{' '}
+              <a
+                href="https://www.car.chula.ac.th"
+                target="_blank"
+                rel="noreferrer noopener"
+                style={{ color: PALETTE.burgundy, textDecoration: 'underline' }}
+              >
+                Office of Academic Resources, Chulalongkorn University
+              </a>
+              . Dashboard scaffolding, data wiring, and visual design were developed in collaboration with{' '}
+              <a
+                href="https://www.anthropic.com/claude"
+                target="_blank"
+                rel="noreferrer noopener"
+                style={{ color: PALETTE.burgundy, textDecoration: 'underline' }}
+              >
+                Claude
+              </a>
+              , Anthropic's AI assistant.
+            </div>
+            <div
+              style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.16em' }}
+              className="uppercase"
+            >
+              {new Date().getFullYear()} · CC0 / MIT
+            </div>
+          </div>
+          <div
+            className="mt-3 flex flex-col items-start justify-between gap-2 md:flex-row md:items-center"
+            style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.12em' }}
+          >
+            <div className="uppercase">Data · OpenAlex.org (CC0) · openalex.org/works</div>
+            <div className="uppercase">Live API · No caching · Counts may shift between loads</div>
+          </div>
         </div>
       </footer>
 
