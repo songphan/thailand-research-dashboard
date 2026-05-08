@@ -2192,7 +2192,7 @@ export default function ResearchOutputDashboard() {
             )}
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={TrendingUp}
               kicker="Visibility"
