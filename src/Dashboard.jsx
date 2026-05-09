@@ -11,10 +11,21 @@ import {
 
 const OPENALEX_BASE = 'https://api.openalex.org';
 
-// Set this to your email to enter the OpenAlex "polite pool" (100k req/day, far higher
-// per-second limits). Leave as empty string to remain anonymous (10 req/sec, you may see
-// 429 errors when many panels load at once). Either an institutional or personal address works.
-const OPENALEX_EMAIL = 'your.email@chula.ac.th';
+// OpenAlex API key. As of Feb 13, 2026, OpenAlex made API keys mandatory and
+// retired both the anonymous tier and the email-based "polite pool". Without
+// a key you get 100 free credits and then HTTP 409 errors.
+//
+// Get a free key at https://openalex.org/settings/api after signing in.
+// Free academic tier provides 100,000 credits per day, which is more than
+// enough for this dashboard.
+//
+// IMPORTANT: this key ships in your client-side JavaScript bundle, which means
+// anyone who views the page source can read it. For a public dashboard with
+// no abuse risk this is acceptable (the worst-case scenario is someone else
+// burning your daily credits, which OpenAlex's per-IP rate limit largely
+// prevents anyway). If you'd rather hide the key, the proper path is a
+// small backend proxy that adds the key server-side.
+const OPENALEX_API_KEY = ''; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -224,10 +235,22 @@ async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
   try {
     const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) {
-      // Retry once on transient failures: 429 (rate limit), 502/503/504 (gateway/timeout)
-      if ((res.status === 429 || res.status >= 502) && attempt < 1) {
+      // 409 Conflict from OpenAlex means out of free credits (no API key set, or
+      // daily limit exceeded). Don't retry; surface a clear message.
+      if (res.status === 409) {
+        throw new Error('HTTP 409 — OpenAlex API key required or daily credits exhausted. See OPENALEX_API_KEY at the top of Dashboard.jsx.');
+      }
+      // Retry on transient failures: 429 (rate limit), 502/503/504 (gateway/timeout).
+      // Use exponential backoff with jitter; this matters most when OPENALEX_API_KEY
+      // is not set or when many parallel calls fire (the dashboard fires ~14 on load).
+      const isTransient = res.status === 429 || res.status >= 502;
+      const maxAttempts = res.status === 429 ? 4 : 2;
+      if (isTransient && attempt < maxAttempts) {
         clearTimeout(t);
-        await new Promise((r) => setTimeout(r, 800 + Math.random() * 600));
+        // 800ms, 1.6s, 3.2s, 6.4s base + 0-600ms jitter
+        const base = 800 * Math.pow(2, attempt);
+        const wait = base + Math.random() * 600;
+        await new Promise((r) => setTimeout(r, wait));
         return fetchJson(url, timeoutMs, attempt + 1);
       }
       throw new Error(`HTTP ${res.status} ${res.statusText || ''}`.trim());
@@ -238,9 +261,12 @@ async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
   }
 }
 
-// Append the polite-pool mailto if configured.
+// Append the OpenAlex api_key parameter if configured. As of Feb 2026 this is
+// effectively required; without it OpenAlex returns 100 credits then 409 errors.
 const withMailto = (url) =>
-  OPENALEX_EMAIL ? url + (url.includes('?') ? '&' : '?') + `mailto=${encodeURIComponent(OPENALEX_EMAIL)}` : url;
+  OPENALEX_API_KEY
+    ? url + (url.includes('?') ? '&' : '?') + `api_key=${encodeURIComponent(OPENALEX_API_KEY)}`
+    : url;
 
 const groupUrl = (filterStr, groupBy, perPage = 200) =>
   withMailto(`${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=${perPage}`);
