@@ -6,7 +6,7 @@ import {
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
   Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X,
-  Table as TableIcon, Download, Search, Quote, Play, ChevronDown
+  Table as TableIcon, Download, Search, ChevronDown, ExternalLink
 } from 'lucide-react';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
@@ -65,9 +65,6 @@ const DIMENSIONS = {
   // Was 'grants.funder' until 2025; OpenAlex removed the grants property in favour of
   // funders and awards. The current filterable + groupable key is funders.id.
   funders:      { filterKey: 'funders.id',                                  label: 'Funder',      filterable: true },
-  // Computed on demand, not via a single OpenAlex group_by. Lives in state for
-  // modal/table reuse but is never used as a filter (filterable: false).
-  citedPublishers: { filterKey: null,                                       label: 'Cited publisher', filterable: false },
 };
 
 const useFonts = () => {
@@ -260,95 +257,6 @@ async function fetchInstitutionsMetadata(ids, chunkSize = 40) {
   return responses.flatMap((r) =>
     r.status === 'fulfilled' ? (r.value?.results || []) : []
   );
-}
-
-// URL for a random sample of works matching the active filter, returning only
-// the IDs we need for the cited-publishers analysis: the work's referenced_works array.
-const sampleWorksUrl = (filterStr, sampleSize, seed) =>
-  withMailto(
-    `${OPENALEX_BASE}/works?filter=${filterStr}` +
-    `&sample=${sampleSize}&seed=${seed}` +
-    `&select=id,referenced_works&per-page=${sampleSize}`
-  );
-
-// URL that aggregates publishers (host_organization) for an explicit set of work IDs.
-const citedPublishersBatchUrl = (workIds) =>
-  withMailto(
-    `${OPENALEX_BASE}/works?filter=openalex:${workIds.join('|')}` +
-    `&group_by=primary_location.source.host_organization&per-page=200`
-  );
-
-// Run async tasks with a fixed concurrency limit. Returns results in input order
-// (failures become null so the caller can decide how to handle partial data).
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = new Array(items.length);
-  let next = 0;
-  const runNext = async () => {
-    while (true) {
-      const i = next++;
-      if (i >= items.length) return;
-      try {
-        results[i] = await worker(items[i], i);
-      } catch {
-        results[i] = null;
-      }
-    }
-  };
-  const runners = Array.from({ length: Math.min(concurrency, items.length) }, runNext);
-  await Promise.all(runners);
-  return results;
-}
-
-// The full analysis: sample N Thai works, collect their referenced work IDs,
-// look up the publishers of those references, aggregate. Reports progress
-// through the onProgress callback.
-async function computeCitedPublishersAnalysis({ filterStr, sampleSize = 200, onProgress }) {
-  const seed = Math.floor(Math.random() * 1e6);
-  // Step 1: sample of citing works
-  onProgress?.({ phase: 'sampling', percent: 0 });
-  const sampleData = await fetchJson(sampleWorksUrl(filterStr, sampleSize, seed));
-  const works = sampleData.results || [];
-  if (works.length === 0) {
-    return { publishers: [], sampleWorks: 0, refsTotal: 0, refsUnique: 0 };
-  }
-  // Step 2: collect unique cited work IDs
-  const citedSet = new Set();
-  let refsTotal = 0;
-  for (const w of works) {
-    const refs = w.referenced_works || [];
-    refsTotal += refs.length;
-    for (const r of refs) citedSet.add(stripPrefix(r));
-  }
-  if (citedSet.size === 0) {
-    return { publishers: [], sampleWorks: works.length, refsTotal: 0, refsUnique: 0 };
-  }
-  const citedIds = Array.from(citedSet);
-  // Step 3: aggregate publishers in batches
-  const BATCH = 80;
-  const chunks = [];
-  for (let i = 0; i < citedIds.length; i += BATCH) chunks.push(citedIds.slice(i, i + BATCH));
-  const publisherCounts = {};
-  const publisherLabels = {};
-  let done = 0;
-  await mapWithConcurrency(chunks, 3, async (chunk) => {
-    const j = await fetchJson(citedPublishersBatchUrl(chunk));
-    (j.group_by || []).forEach((g) => {
-      if (!g.key || g.key === 'unknown') return;
-      publisherCounts[g.key] = (publisherCounts[g.key] || 0) + g.count;
-      publisherLabels[g.key] = g.key_display_name;
-    });
-    done += 1;
-    onProgress?.({ phase: 'aggregating', percent: done / chunks.length });
-  });
-  const publishers = Object.entries(publisherCounts)
-    .map(([key, value]) => ({ key, label: cleanLabel(publisherLabels[key], 36), value }))
-    .sort((a, b) => b.value - a.value);
-  return {
-    publishers,
-    sampleWorks: works.length,
-    refsTotal,
-    refsUnique: citedIds.length,
-  };
 }
 
 const Card = ({ children, className = '', style = {} }) => (
@@ -1330,21 +1238,10 @@ export default function ResearchOutputDashboard() {
   const DEFAULT_LIMITS = {
     institutions: 15, fields: 14, subfields: 12, docTypes: 7,
     oaStatus: 6, publishers: 12, languages: 8, sdgs: 14,
-    collaborators: 14, funders: 12, citedPublishers: 15,
+    collaborators: 14, funders: 12,
   };
   const [displayLimits, setDisplayLimits] = useState(DEFAULT_LIMITS);
   const [tableOpenDim, setTableOpenDim] = useState(null);
-
-  // Cited-publishers analysis state. Runs on demand, resets when filters change.
-  const [citedAnalysis, setCitedAnalysis] = useState({
-    status: 'idle',          // 'idle' | 'loading' | 'ready' | 'error'
-    progress: 0,
-    phase: '',
-    error: null,
-    sampleSize: 200,
-    result: null,            // { publishers, sampleWorks, refsTotal, refsUnique }
-    forFilterKey: null,      // tracks whether the current result matches active filters
-  });
 
   const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
@@ -1548,61 +1445,6 @@ export default function ResearchOutputDashboard() {
     return () => { cancelled = true; };
   }, [year, refreshKey, filterStrings]);
 
-  // Reset cited-publishers analysis when filters or year change.
-  useEffect(() => {
-    setCitedAnalysis((prev) =>
-      prev.forFilterKey === filterStrings.all
-        ? prev
-        : { status: 'idle', progress: 0, phase: '', error: null, sampleSize: prev.sampleSize, result: null, forFilterKey: null }
-    );
-    // Also clear the mirrored state slot used by the table modal
-    setState((s) => ({ ...s, citedPublishers: { status: 'idle', data: [] } }));
-  }, [filterStrings]);
-
-  // Trigger an analysis run.
-  const runCitedAnalysis = async () => {
-    const filterKey = filterStrings.all;
-    setCitedAnalysis({
-      status: 'loading',
-      progress: 0,
-      phase: 'sampling',
-      error: null,
-      sampleSize: citedAnalysis.sampleSize,
-      result: null,
-      forFilterKey: filterKey,
-    });
-    try {
-      const result = await computeCitedPublishersAnalysis({
-        filterStr: filterKey,
-        sampleSize: citedAnalysis.sampleSize,
-        onProgress: ({ phase, percent }) =>
-          setCitedAnalysis((s) => ({ ...s, phase, progress: percent })),
-      });
-      // Bail if filters changed mid-run
-      if (filterKey !== filterStrings.all) return;
-      setCitedAnalysis({
-        status: 'ready',
-        progress: 1,
-        phase: 'done',
-        error: null,
-        sampleSize: citedAnalysis.sampleSize,
-        result,
-        forFilterKey: filterKey,
-      });
-      // Mirror data into state so the existing TableModal can read it
-      setState((s) => ({
-        ...s,
-        citedPublishers: { status: 'ready', data: result.publishers },
-      }));
-    } catch (e) {
-      setCitedAnalysis((s) => ({
-        ...s,
-        status: 'error',
-        error: e.message || 'Computation failed',
-      }));
-    }
-  };
-
   const selKeys = (dim) => (filters[dim] || []).map((f) => f.value);
 
   // Returns a click handler only if the dimension is filterable; otherwise undefined,
@@ -1632,9 +1474,9 @@ export default function ResearchOutputDashboard() {
       }}
     >
       <header className="border-b" style={{ borderColor: PALETTE.ink, background: PALETTE.paper }}>
-        {/* OAR Chula logo strip */}
+        {/* OAR Chula logo strip + cross-link to companion dashboard */}
         <div className="border-b" style={{ borderColor: PALETTE.rule }}>
-          <div className="mx-auto max-w-[1400px] px-6 py-3">
+          <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-6 py-3">
             <a
               href="https://www.car.chula.ac.th"
               target="_blank"
@@ -1647,6 +1489,34 @@ export default function ResearchOutputDashboard() {
                 alt="Office of Academic Resources, Chulalongkorn University"
                 style={{ height: 44, width: 'auto', display: 'block' }}
               />
+            </a>
+            <a
+              href="https://thailand-citations-dashboard.vercel.app/"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="group flex items-center gap-2 rounded-sm px-3 py-2 transition-colors"
+              style={{
+                border: `1px solid ${PALETTE.rule}`,
+                background: 'transparent',
+                color: PALETTE.charcoal,
+                fontFamily: FONT_BODY,
+                fontSize: 12,
+                lineHeight: 1.3,
+              }}
+              title="Open the Thailand Citations Dashboard in a new tab"
+            >
+              <div className="flex flex-col items-end">
+                <span
+                  style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }}
+                  className="uppercase"
+                >
+                  Companion view
+                </span>
+                <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 14, color: PALETTE.ink, fontWeight: 500 }}>
+                  Thailand Citations Dashboard
+                </span>
+              </div>
+              <ExternalLink size={14} style={{ color: PALETTE.muted }} className="group-hover:text-[var(--ink)]" />
             </a>
           </div>
         </div>
@@ -2049,149 +1919,6 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-12" style={{ borderStyle: 'dashed', borderWidth: 1, borderColor: PALETTE.charcoal }}>
-            <SectionTitle
-              icon={Quote}
-              kicker="Outgoing references · who they cite"
-              title="Cited publishers"
-              hint="Sample-based · respects active filters"
-            />
-            {citedAnalysis.status === 'idle' && (
-              <div
-                className="flex flex-col items-start gap-3 px-2 py-3"
-                style={{ fontFamily: FONT_BODY, color: PALETTE.charcoal, fontSize: 13, lineHeight: 1.55, maxWidth: 720 }}
-              >
-                <p className="m-0">
-                  This analysis samples {citedAnalysis.sampleSize} works from the current selection, pulls their reference lists,
-                  and aggregates the publishers of the cited works. OpenAlex does not pre-aggregate this, so it runs on demand and
-                  takes roughly 10 to 25 seconds depending on the size of the sample and your network. Re-run after changing filters.
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">
-                    Sample size
-                  </span>
-                  {[100, 200, 500].map((n) => {
-                    const active = citedAnalysis.sampleSize === n;
-                    return (
-                      <button
-                        key={n}
-                        onClick={() => setCitedAnalysis((s) => ({ ...s, sampleSize: n }))}
-                        className="rounded-sm px-2 py-0.5 transition-colors"
-                        style={{
-                          border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
-                          background: active ? PALETTE.ink : 'transparent',
-                          color: active ? PALETTE.cream : PALETTE.charcoal,
-                          fontFamily: FONT_MONO,
-                          fontSize: 11,
-                        }}
-                      >
-                        {n} works
-                      </button>
-                    );
-                  })}
-                  <button
-                    onClick={runCitedAnalysis}
-                    className="ml-2 flex items-center gap-1.5 rounded-sm px-3 py-1.5 transition-colors"
-                    style={{
-                      background: PALETTE.ink,
-                      color: PALETTE.cream,
-                      fontFamily: FONT_MONO,
-                      fontSize: 11,
-                      letterSpacing: '0.06em',
-                    }}
-                  >
-                    <Play size={12} />
-                    <span>Compute</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {citedAnalysis.status === 'loading' && (
-              <div className="px-2 py-6">
-                <div className="flex items-center gap-3" style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-                  <Loader2 size={16} className="animate-spin" />
-                  <span>
-                    {citedAnalysis.phase === 'sampling' ? 'Sampling works…' : 'Aggregating publishers of cited works…'}
-                  </span>
-                  <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
-                    {Math.round(citedAnalysis.progress * 100)}%
-                  </span>
-                </div>
-                <div
-                  className="mt-2 h-1.5 w-full overflow-hidden rounded-sm"
-                  style={{ background: PALETTE.rule }}
-                >
-                  <div
-                    style={{
-                      width: `${Math.max(2, citedAnalysis.progress * 100)}%`,
-                      height: '100%',
-                      background: PALETTE.charcoal,
-                      transition: 'width 0.2s ease',
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {citedAnalysis.status === 'error' && (
-              <div className="flex flex-col items-start gap-2 px-2 py-4" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
-                <div className="flex items-center gap-2">
-                  <AlertCircle size={16} />
-                  <span style={{ fontSize: 13 }}>Analysis failed.</span>
-                </div>
-                <div style={{ fontSize: 11, color: PALETTE.muted }}>{citedAnalysis.error}</div>
-                <button
-                  onClick={runCitedAnalysis}
-                  className="mt-1 rounded-sm px-3 py-1"
-                  style={{ border: `1px solid ${PALETTE.ink}`, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink }}
-                >
-                  Retry
-                </button>
-              </div>
-            )}
-
-            {citedAnalysis.status === 'ready' && citedAnalysis.result && (
-              <div>
-                <div
-                  className="mb-3 flex flex-wrap items-baseline gap-x-5 gap-y-1"
-                  style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.muted }}
-                >
-                  <span>
-                    Sample of <strong style={{ color: PALETTE.ink }}>{fmtFull(citedAnalysis.result.sampleWorks)}</strong> works
-                  </span>
-                  <span>
-                    {fmtFull(citedAnalysis.result.refsTotal)} outgoing references
-                  </span>
-                  <span>
-                    {fmtFull(citedAnalysis.result.refsUnique)} unique cited works
-                  </span>
-                  <span>
-                    {fmtFull(citedAnalysis.result.publishers.length)} distinct publishers
-                  </span>
-                  <button
-                    onClick={runCitedAnalysis}
-                    className="ml-auto flex items-center gap-1.5 rounded-sm px-2.5 py-1"
-                    style={{ border: `1px solid ${PALETTE.rule}`, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.charcoal }}
-                  >
-                    <RefreshCw size={11} />
-                    Re-sample
-                  </button>
-                </div>
-                <HBar
-                  data={(citedAnalysis.result.publishers || []).slice(0, limitFor('citedPublishers'))}
-                  color={PALETTE.charcoal}
-                />
-                <ChartControls
-                  total={(citedAnalysis.result.publishers || []).length}
-                  limit={limitFor('citedPublishers')}
-                  onLimitChange={setLimit('citedPublishers')}
-                  onOpenTable={() => setTableOpenDim('citedPublishers')}
-                />
-              </div>
-            )}
-          </Card>
-
           <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={TrendingUp}
@@ -2199,6 +1926,14 @@ export default function ResearchOutputDashboard() {
               title="Most-cited works in selection"
               hint="Live ranking; very recent works under-cite"
             />
+            <p
+              className="-mt-2 mb-4 max-w-3xl"
+              style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
+            >
+              Top {countryName(country)}-affiliated publications by incoming citation count, ranked from the works in the active
+              selection. Citation counts accumulate over time, so works from the most recent year typically appear lower than their
+              eventual standing.
+            </p>
             <ChartFrame status={state.topWorks?.status} error={state.topWorks?.error}>
               <ol className="space-y-3">
                 {(state.topWorks?.data || []).map((w, i) => (
