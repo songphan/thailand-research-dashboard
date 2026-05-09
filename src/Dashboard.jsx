@@ -6,7 +6,7 @@ import {
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
   Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X,
-  Table as TableIcon, Download, Search, ChevronDown, ExternalLink
+  Table as TableIcon, Download, Search, ChevronDown
 } from 'lucide-react';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
@@ -1461,7 +1461,6 @@ export default function ResearchOutputDashboard() {
   const totalCount = state.total?.data;
   const oaCount = state.oaCount?.data;
   const intlCount = state.intlCount?.data;
-  const topInstitution = state.institutions?.data?.[0];
   const filterCount = Object.values(filters).reduce((s, arr) => s + (arr?.length || 0), 0);
 
   return (
@@ -1494,29 +1493,23 @@ export default function ResearchOutputDashboard() {
               href="https://thailand-citations-dashboard.vercel.app/"
               target="_blank"
               rel="noreferrer noopener"
-              className="group flex items-center gap-2 rounded-sm px-3 py-2 transition-colors"
+              className="th-cross-link inline-flex items-center gap-1.5 px-3 py-2 transition-colors"
               style={{
-                border: `1px solid ${PALETTE.rule}`,
-                background: 'transparent',
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                letterSpacing: '0.12em',
+                textTransform: 'uppercase',
+                background: PALETTE.cream,
                 color: PALETTE.charcoal,
-                fontFamily: FONT_BODY,
-                fontSize: 12,
-                lineHeight: 1.3,
+                border: `1px solid ${PALETTE.rule}`,
+                textDecoration: 'none',
+                whiteSpace: 'nowrap',
               }}
               title="Open the Thailand Citations Dashboard in a new tab"
             >
-              <div className="flex flex-col items-end">
-                <span
-                  style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }}
-                  className="uppercase"
-                >
-                  Companion view
-                </span>
-                <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 14, color: PALETTE.ink, fontWeight: 500 }}>
-                  Thailand Citations Dashboard
-                </span>
-              </div>
-              <ExternalLink size={14} style={{ color: PALETTE.muted }} className="group-hover:text-[var(--ink)]" />
+              <span className="hidden sm:inline">Thailand Citations Dashboard</span>
+              <span className="sm:hidden">Citations Dashboard</span>
+              <span aria-hidden="true">↗</span>
             </a>
           </div>
         </div>
@@ -1599,7 +1592,7 @@ export default function ResearchOutputDashboard() {
       </header>
 
       <section className="mx-auto max-w-[1400px] px-6 pt-6">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <StatCard
             kicker={filterCount ? 'Filtered works' : `Total works · ${country} affiliated`}
             value={totalCount != null ? fmtFull(totalCount) : '—'}
@@ -1620,19 +1613,6 @@ export default function ResearchOutputDashboard() {
             sub={intlCount != null && totalCount ? `${fmtFull(intlCount)} works include ≥2 country affiliations.` : 'Loading slice…'}
             accent={PALETTE.teal}
             loading={state.intlCount?.status === 'loading' || state.total?.status === 'loading'}
-          />
-          <StatCard
-            kicker={`Top contributor · ${country}`}
-            value={
-              topInstitution ? (
-                <span style={{ fontSize: 22, lineHeight: 1.15, fontStyle: 'italic' }}>
-                  {topInstitution.label}
-                </span>
-              ) : '—'
-            }
-            sub={topInstitution ? `${fmtFull(topInstitution.value)} works · ${pct(topInstitution.value, totalCount || 0)} of current selection` : 'Loading…'}
-            accent={PALETTE.burgundy}
-            loading={state.institutions?.status === 'loading'}
           />
           <StatCard
             kicker="Outgoing citations"

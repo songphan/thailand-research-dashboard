@@ -18,3 +18,11 @@ body {
 .recharts-default-tooltip {
   border-radius: 2px !important;
 }
+
+/* Cross-link to companion citations dashboard: hover-inverts to mirror the
+   visual treatment used on the citations dashboard's reciprocal link. */
+.th-cross-link:hover {
+  background: #1a1612 !important;   /* PALETTE.ink */
+  color: #f6f1e7 !important;        /* PALETTE.cream */
+  border-color: #1a1612 !important;
+}
