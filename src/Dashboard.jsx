@@ -56,18 +56,19 @@ const YEARS = [2025, 2024, 2023, 2022, 2021, 2020];
 // will continue to display the data but its bars/slices become read-only.
 //
 // Verified against https://developers.openalex.org/api-reference/works on 2026-05-09.
-// Note: the `type` filter requires values to be prefixed with "types/" even though
-// group_by returns bare strings. That conversion happens in normalizeFilterValue().
 const DIMENSIONS = {
   institutions: { filterKey: 'authorships.institutions.id',                 label: 'Institution', filterable: true },
   fields:       { filterKey: 'primary_topic.field.id',                      label: 'Field',       filterable: true },
   subfields:    { filterKey: 'primary_topic.subfield.id',                   label: 'Subfield',    filterable: true },
-  docTypes:     { filterKey: 'type',                                        label: 'Type',        filterable: true },
+  // Document type and language: filtering is disabled because in practice combining
+  // these with the country_code filter collapses most other panels to empty results,
+  // suggesting OpenAlex's joint distributions for these dimensions don't behave the
+  // way faceted-search UIs expect. The charts still display the breakdown, just
+  // without click-to-filter.
+  docTypes:     { filterKey: 'type',                                        label: 'Type',        filterable: false },
   oaStatus:     { filterKey: 'open_access.oa_status',                       label: 'OA',          filterable: true },
   publishers:   { filterKey: 'primary_location.source.host_organization',   label: 'Publisher',   filterable: true },
-  // Language: OpenAlex accepts the bare ISO-639-1 code as filter value (language:en).
-  // If you observe empty results when filtering, set filterable: false.
-  languages:    { filterKey: 'language',                                    label: 'Language',    filterable: true },
+  languages:    { filterKey: 'language',                                    label: 'Language',    filterable: false },
   sdgs:         { filterKey: 'sustainable_development_goals.id',            label: 'SDG',         filterable: true },
   collaborators:{ filterKey: 'authorships.countries',                       label: 'Co-author',   filterable: true },
   // Was 'grants.funder' until 2025; OpenAlex removed the grants property in favour of
@@ -189,18 +190,10 @@ const TYPE_NAMES = {
 
 // Convert group_by keys (URLs and codes) to the value form OpenAlex accepts in filters.
 // Convert group_by keys (URLs and codes) to the value form OpenAlex accepts in filters.
-// Different OpenAlex dimensions return different key formats from group_by; the filter
-// endpoint sometimes wants a different shape. This function maps from group_by key to
-// filter value for every dimension where the two differ.
+// For most dimensions the two forms agree; for some (institutions, fields, SDGs) the
+// group_by key is a URL while the filter wants a bare ID.
 const normalizeFilterValue = (key, dim = null) => {
   if (typeof key !== 'string') return String(key);
-  // Type filter: group_by returns bare strings ("article", "book-chapter") but the
-  // filter endpoint requires the "types/" prefix. This mismatch was introduced in a
-  // 2024 OpenAlex update; documented in the openalex-community google group thread
-  // "Works/Publisher filter?" (Jul 2024).
-  if (dim === 'docTypes' && /^[a-z][a-z-]*$/i.test(key)) {
-    return `types/${key}`;
-  }
   let m = key.match(/^https:\/\/openalex\.org\/([A-Z]\d+)$/);
   if (m) return m[1];
   m = key.match(/^https:\/\/openalex\.org\/(fields|subfields|topics|domains)\/(\w+)$/);
