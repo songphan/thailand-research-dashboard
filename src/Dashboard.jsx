@@ -25,7 +25,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // burning your daily credits, which OpenAlex's per-IP rate limit largely
 // prevents anyway). If you'd rather hide the key, the proper path is a
 // small backend proxy that adds the key server-side.
-const OPENALEX_API_KEY = ''; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
+const OPENALEX_API_KEY = 'wPzRa7six3VGUf4dYxNYmv'; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
 
 const PALETTE = {
   cream: '#f6f1e7',
