@@ -539,14 +539,125 @@ const StatCard = ({ kicker, value, sub, accent, loading }) => (
   </Card>
 );
 
+// Sticky variant of the breadcrumb. Appears as a floating bar at the top of the
+// viewport once the user scrolls past the inline breadcrumb in the header AND has
+// at least one filter active. Uses position:fixed so it overlays content rather
+// than reflowing the page. Intentionally not shown when no filters are active,
+// since it would otherwise be a permanent empty bar wasting vertical space.
+const StickyFilterBreadcrumb = ({ filters, onRemove, onClear, anchorRef }) => {
+  const [visible, setVisible] = useState(false);
+  const all = Object.entries(filters).flatMap(([dim, items]) =>
+    (items || []).map((item) => ({ dim, ...item }))
+  );
+  const hasFilters = all.length > 0;
+
+  useEffect(() => {
+    if (!anchorRef?.current) return;
+    // Show the floating bar when the inline breadcrumb scrolls out of view.
+    // We use IntersectionObserver to keep this cheap and event-listener-free.
+    const obs = new IntersectionObserver(
+      ([entry]) => setVisible(!entry.isIntersecting),
+      { rootMargin: '-1px 0px 0px 0px', threshold: 0 }
+    );
+    obs.observe(anchorRef.current);
+    return () => obs.disconnect();
+  }, [anchorRef]);
+
+  if (!hasFilters || !visible) return null;
+
+  return (
+    <div
+      className="fixed left-0 right-0 top-0 z-40 border-b shadow-sm"
+      style={{
+        background: PALETTE.paper,
+        borderColor: PALETTE.ink,
+        boxShadow: '0 2px 8px rgba(26,22,18,0.08)',
+        backdropFilter: 'saturate(1.4) blur(2px)',
+      }}
+      role="region"
+      aria-label="Active filters"
+    >
+      <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-2 px-6 py-2.5">
+        <span
+          style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.2em' }}
+          className="uppercase flex-none"
+        >
+          Filtering by
+        </span>
+        {all.map((f) => {
+          const def = DIMENSIONS[f.dim];
+          return (
+            <button
+              key={`sticky::${f.dim}::${f.value}`}
+              onClick={() => onRemove(f.dim, f.value)}
+              className="group flex items-center gap-2 rounded-sm px-2 py-1 transition-colors"
+              style={{
+                background: PALETTE.ink,
+                color: PALETTE.cream,
+                fontFamily: FONT_BODY,
+                fontSize: 12,
+                maxWidth: 320,
+              }}
+              title="Remove this filter"
+            >
+              <span
+                style={{ fontFamily: FONT_MONO, fontSize: 9, opacity: 0.55, letterSpacing: '0.1em' }}
+                className="uppercase"
+              >
+                {def?.label || f.dim}
+              </span>
+              <span className="truncate">{f.label}</span>
+              <X size={12} className="flex-none opacity-60 group-hover:opacity-100" />
+            </button>
+          );
+        })}
+        <button
+          onClick={onClear}
+          className="ml-1"
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 11,
+            color: PALETTE.burgundy,
+            textDecoration: 'underline',
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+          }}
+        >
+          Clear all
+        </button>
+        <button
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            color: PALETTE.muted,
+            background: 'transparent',
+            border: `1px solid ${PALETTE.rule}`,
+            padding: '4px 10px',
+            borderRadius: 2,
+            cursor: 'pointer',
+            letterSpacing: '0.1em',
+          }}
+          className="ml-auto flex-none uppercase hover:bg-[var(--cream)]"
+          title="Scroll back to top"
+        >
+          ↑ Top
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // Filter pills row. Renders one chip per active filter and a Clear all link.
-const FilterBreadcrumb = ({ filters, onRemove, onClear }) => {
+const FilterBreadcrumb = ({ filters, onRemove, onClear, innerRef }) => {
   const all = Object.entries(filters).flatMap(([dim, items]) =>
     (items || []).map((item) => ({ dim, ...item }))
   );
   const active = all.length > 0;
   return (
     <div
+      ref={innerRef}
       className="mt-4 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2.5"
       style={{
         borderColor: active ? PALETTE.ink : PALETTE.rule,
@@ -1463,6 +1574,9 @@ export default function ResearchOutputDashboard() {
   const intlCount = state.intlCount?.data;
   const filterCount = Object.values(filters).reduce((s, arr) => s + (arr?.length || 0), 0);
 
+  // Ref to the inline breadcrumb so the sticky variant knows when it scrolls out of view.
+  const breadcrumbAnchorRef = React.useRef(null);
+
   return (
     <div
       className="min-h-screen w-full"
@@ -1472,6 +1586,12 @@ export default function ResearchOutputDashboard() {
         fontFamily: FONT_BODY,
       }}
     >
+      <StickyFilterBreadcrumb
+        filters={filters}
+        onRemove={removeFilter}
+        onClear={clearFilters}
+        anchorRef={breadcrumbAnchorRef}
+      />
       <header className="border-b" style={{ borderColor: PALETTE.ink, background: PALETTE.paper }}>
         {/* OAR Chula logo strip + cross-link to companion dashboard */}
         <div className="border-b" style={{ borderColor: PALETTE.rule }}>
@@ -1587,7 +1707,12 @@ export default function ResearchOutputDashboard() {
             </div>
           </div>
 
-          <FilterBreadcrumb filters={filters} onRemove={removeFilter} onClear={clearFilters} />
+          <FilterBreadcrumb
+            filters={filters}
+            onRemove={removeFilter}
+            onClear={clearFilters}
+            innerRef={breadcrumbAnchorRef}
+          />
         </div>
       </header>
 
