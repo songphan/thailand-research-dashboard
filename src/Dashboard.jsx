@@ -297,24 +297,32 @@ async function fetchInstitutionsMetadata(ids, chunkSize = 40) {
   );
 }
 
-// Paginate group_by results past OpenAlex's 200-per-page cap using their
-// group_by_continuation_token. We cap at maxPages to avoid runaway loops.
-// The API returns groups in descending count order, so the first 200 covers
-// the bulk of the distribution; pagination matters for long-tail dimensions
-// where many entities share small counts (e.g. all Thai institutions).
-async function fetchAllGroups(filterStr, groupBy, maxPages = 5) {
+// Paginate group_by results past OpenAlex's 200-per-page cap using the cursor
+// pagination protocol (cursor=* on first request, then the cursor from
+// meta.next_cursor on subsequent requests). Note: OpenAlex returns paged groups
+// sorted by KEY (not by count), so callers should re-sort after.
+//
+// We cap pages defensively to avoid runaway loops on dimensions with absurd
+// long tails. For "all Thai institutions" the actual count is ~260, so 5 pages
+// at 200 per page is more than enough; for global "all institutions worldwide"
+// the cap is the only thing keeping us from a 50k-row blast.
+async function fetchAllGroups(filterStr, groupBy, maxPages = 8) {
   const all = [];
-  let token = null;
+  let cursor = '*';
   for (let page = 0; page < maxPages; page++) {
-    const tokenParam = token ? `&group_by_continuation_token=${encodeURIComponent(token)}` : '';
     const url = withMailto(
-      `${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=200${tokenParam}`
+      `${OPENALEX_BASE}/works?filter=${filterStr}` +
+      `&group_by=${groupBy}` +
+      `&per-page=200` +
+      `&cursor=${encodeURIComponent(cursor)}`
     );
     const j = await fetchJson(url);
     const batch = j.group_by || [];
     all.push(...batch);
-    token = j.group_by_continuation_token;
-    if (!token || batch.length === 0) break;
+    cursor = j?.group_by_cursor || j?.meta?.next_cursor;
+    // Stop if API returned no more results, or no cursor was emitted, or the batch
+    // came back smaller than the page size (signals last page).
+    if (!cursor || batch.length === 0 || batch.length < 200) break;
   }
   return all;
 }
@@ -333,7 +341,7 @@ const Card = ({ children, className = '', style = {} }) => (
   </div>
 );
 
-const SectionTitle = ({ icon: Icon, kicker, title, hint }) => (
+const SectionTitle = ({ icon: Icon, kicker, title, hint, count, countLabel }) => (
   <div className="mb-4 flex items-start justify-between gap-3">
     <div className="flex items-start gap-3">
       {Icon && (
@@ -357,6 +365,19 @@ const SectionTitle = ({ icon: Icon, kicker, title, hint }) => (
         >
           {title}
         </h3>
+        {count != null && (
+          <div
+            style={{ fontFamily: FONT_MONO, color: PALETTE.charcoal, fontSize: 11, letterSpacing: '0.04em' }}
+            className="mt-1"
+          >
+            <span style={{ color: PALETTE.muted }}>n</span>
+            <span> = </span>
+            <span style={{ fontWeight: 500 }}>{typeof count === 'number' ? count.toLocaleString() : count}</span>
+            {countLabel && (
+              <span style={{ color: PALETTE.muted }}> {countLabel}</span>
+            )}
+          </div>
+        )}
       </div>
     </div>
     {hint && (
@@ -1739,6 +1760,20 @@ export default function ResearchOutputDashboard() {
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
   const sliceFor = (dim) => (state[dim]?.data || []).slice(0, limitFor(dim));
 
+  // Total distinct items in a panel's dataset, with a flag for whether the data
+  // is likely truncated by OpenAlex's 200-per-page group_by cap. The institutions
+  // panel paginates so its count is exact; other panels show one page only and
+  // the cap is hit when exactly 200 rows came back.
+  const panelN = (dim) => {
+    const data = state[dim]?.data || [];
+    const n = data.length;
+    if (n === 0) return null;
+    // Institutions is paginated; trust the count exactly.
+    if (dim === 'institutions') return { count: n, truncated: false };
+    // Single-page panels: 200 rows = at the OpenAlex group_by cap, so flag.
+    return { count: n, truncated: n >= 200 };
+  };
+
   // Apply local type/subcategory filters to the institutions chart data.
   // The full list (post-pagination) is in state.institutions.data; we narrow it
   // in-memory rather than re-querying OpenAlex.
@@ -1798,13 +1833,61 @@ export default function ResearchOutputDashboard() {
 
   const clearFilters = () => setFilters({});
 
+  // When a type or subcategory pill is active, derive the matching set of OpenAlex
+  // institution IDs from the loaded data and inject them into every panel's filter
+  // string (except the institutions panel itself, which already filters locally).
+  // This makes the type/subcategory pills behave as cross-filters, just like clicking
+  // an individual institution bar would.
+  const syntheticInstitutionFilter = useMemo(() => {
+    const all = state.institutions?.data || [];
+    if (instTypeFilter === 'all' && instSubcategoryFilter === 'all') return null;
+    let matching = all;
+    if (instTypeFilter !== 'all') {
+      matching = matching.filter((d) => d.type === instTypeFilter);
+    }
+    if (instSubcategoryFilter !== 'all') {
+      matching = matching.filter((d) => d.subcategory === instSubcategoryFilter);
+    }
+    if (matching.length === 0) return null;
+    const ids = matching.map((d) => stripPrefix(d.key));
+    // OpenAlex filter URLs can get long; cap at 200 IDs to stay under the
+    // ~2KB practical URL limit. The xlsx-derived MHESI buckets all fit easily,
+    // since the largest (private) is 104 entries.
+    const capped = ids.slice(0, 200);
+    return {
+      ids: capped,
+      cappedAt: ids.length > 200 ? 200 : null,
+      totalMatching: ids.length,
+      label: instSubcategoryFilter !== 'all'
+        ? (EDUCATION_SUBCATEGORIES.find((sc) => sc.key === instSubcategoryFilter)?.label || instSubcategoryFilter)
+        : (INSTITUTION_TYPES.find((t) => t.key === instTypeFilter)?.label || instTypeFilter),
+    };
+  }, [state.institutions?.data, instTypeFilter, instSubcategoryFilter]);
+
   const filterStrings = useMemo(() => {
-    const m = { all: buildFilterString(country, year, filters) };
+    // Base filters, always built from the breadcrumb chips.
+    const baseAll = buildFilterString(country, year, filters);
+    const baseByDim = {};
     Object.keys(DIMENSIONS).forEach((d) => {
-      m[d] = buildFilterString(country, year, filters, d);
+      baseByDim[d] = buildFilterString(country, year, filters, d);
+    });
+
+    // Augment with the synthetic institution-ID filter when a type/subcategory is active.
+    const inst = syntheticInstitutionFilter;
+    const augmented = (s, includeInstitutions) => {
+      if (!inst || !includeInstitutions) return s;
+      const idsClause = `authorships.institutions.id:${inst.ids.join('|')}`;
+      return s ? `${s},${idsClause}` : idsClause;
+    };
+
+    const m = { all: augmented(baseAll, true) };
+    Object.keys(DIMENSIONS).forEach((d) => {
+      // The institutions panel itself doesn't need the synthetic filter applied,
+      // because it already shows the full TH institution list and filters locally.
+      m[d] = augmented(baseByDim[d], d !== 'institutions');
     });
     return m;
-  }, [country, year, filters]);
+  }, [country, year, filters, syntheticInstitutionFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1949,7 +2032,7 @@ export default function ResearchOutputDashboard() {
     setPanel('institutions', { status: 'loading', error: null });
     (async () => {
       try {
-        const top = await fetchAllGroups(filterStrings.institutions, 'authorships.institutions.id', 5);
+        const top = await fetchAllGroups(filterStrings.institutions, 'authorships.institutions.id');
         if (cancelled) return;
         if (top.length === 0) {
           setPanel('institutions', { status: 'ready', data: [] });
@@ -1977,7 +2060,10 @@ export default function ResearchOutputDashboard() {
               subcategory: type === 'education' ? subcategoryFor(m?.display_name || g.key_display_name) : null,
             };
           })
-          .filter((d) => d.country === country);
+          .filter((d) => d.country === country)
+          // Re-sort by count desc, since cursor-paginated group_by returns groups
+          // sorted by key (not by count) per OpenAlex's pagination behaviour.
+          .sort((a, b) => b.value - a.value);
         setPanel('institutions', { status: 'ready', data });
       } catch (e) {
         if (cancelled) return;
@@ -2139,6 +2225,50 @@ export default function ResearchOutputDashboard() {
             </div>
           </div>
 
+          {syntheticInstitutionFilter && (
+            <div
+              className="mt-3 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2"
+              style={{
+                background: PALETTE.cream,
+                borderColor: PALETTE.burgundy,
+              }}
+            >
+              <span
+                style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.burgundy }}
+                className="uppercase"
+              >
+                Cross-filter
+              </span>
+              <span
+                style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}
+              >
+                Whole dashboard restricted to{' '}
+                <strong style={{ color: PALETTE.ink }}>{syntheticInstitutionFilter.label}</strong>
+                {' '}({fmtFull(syntheticInstitutionFilter.totalMatching)} institution{syntheticInstitutionFilter.totalMatching === 1 ? '' : 's'}
+                {syntheticInstitutionFilter.cappedAt ? `, capped at ${syntheticInstitutionFilter.cappedAt}` : ''}
+                )
+              </span>
+              <button
+                onClick={() => {
+                  setInstTypeFilter('all');
+                  setInstSubcategoryFilter('all');
+                }}
+                style={{
+                  marginLeft: 'auto',
+                  fontFamily: FONT_MONO,
+                  fontSize: 11,
+                  color: PALETTE.burgundy,
+                  textDecoration: 'underline',
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                }}
+              >
+                Clear
+              </button>
+            </div>
+          )}
+
           <FilterBreadcrumb
             filters={filters}
             onRemove={removeFilter}
@@ -2203,6 +2333,14 @@ export default function ResearchOutputDashboard() {
               kicker="Producing institutions"
               title="Where the research happens"
               hint={`All ${countryName(country)} institutions · click bar to filter dashboard`}
+              count={
+                state.institutions?.status === 'ready'
+                  ? (institutionsFiltered.length === (state.institutions?.data || []).length
+                      ? institutionsFiltered.length
+                      : `${institutionsFiltered.length} of ${(state.institutions?.data || []).length}`)
+                  : null
+              }
+              countLabel="institutions"
             />
             {/* Type filter pills */}
             <div className="mb-3 flex flex-wrap items-center gap-1.5">
@@ -2291,6 +2429,8 @@ export default function ResearchOutputDashboard() {
               kicker="Disciplinary mix"
               title="Fields of inquiry"
               hint="OpenAlex primary_topic.field"
+              count={panelN('fields')?.count}
+              countLabel={panelN('fields')?.truncated ? 'fields shown · capped at 200' : 'distinct fields'}
             />
             <ChartFrame status={state.fields?.status} error={state.fields?.error}>
               <HBar
@@ -2314,6 +2454,8 @@ export default function ResearchOutputDashboard() {
               kicker="Granular topics"
               title="Active subfields"
               hint="OpenAlex primary_topic.subfield"
+              count={panelN('subfields')?.count}
+              countLabel={panelN('subfields')?.truncated ? 'subfields shown · capped at 200' : 'distinct subfields'}
             />
             <ChartFrame status={state.subfields?.status} error={state.subfields?.error}>
               <HBar
@@ -2332,7 +2474,13 @@ export default function ResearchOutputDashboard() {
           </Card>
 
           <Card className="p-5 lg:col-span-4">
-            <SectionTitle icon={FileText} kicker="Output forms" title="Document types" />
+            <SectionTitle
+              icon={FileText}
+              kicker="Output forms"
+              title="Document types"
+              count={panelN('docTypes')?.count}
+              countLabel="document types"
+            />
             <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
               <Donut
                 data={sliceFor('docTypes')}
@@ -2356,6 +2504,8 @@ export default function ResearchOutputDashboard() {
               kicker="Access regime"
               title="Open access pathways"
               hint="Gold · Green · Hybrid · Bronze · Closed"
+              count={panelN('oaStatus')?.count}
+              countLabel="OA pathways"
             />
             <ChartFrame status={state.oaStatus?.status} error={state.oaStatus?.error}>
               <Donut
@@ -2376,7 +2526,13 @@ export default function ResearchOutputDashboard() {
           </Card>
 
           <Card className="p-5 lg:col-span-4">
-            <SectionTitle icon={Languages} kicker="Language of record" title="Publication languages" />
+            <SectionTitle
+              icon={Languages}
+              kicker="Language of record"
+              title="Publication languages"
+              count={panelN('languages')?.count}
+              countLabel="languages"
+            />
             <ChartFrame status={state.languages?.status} error={state.languages?.error}>
               <Donut
                 data={sliceFor('languages')}
@@ -2400,6 +2556,8 @@ export default function ResearchOutputDashboard() {
               kicker="Publishing channels"
               title={`Top publishers carrying ${countryName(country)} output`}
               hint="Host organisation of the primary location"
+              count={panelN('publishers')?.count}
+              countLabel={panelN('publishers')?.truncated ? 'publishers shown · capped at 200' : 'distinct publishers'}
             />
             <ChartFrame status={state.publishers?.status} error={state.publishers?.error}>
               <HBar
@@ -2423,6 +2581,8 @@ export default function ResearchOutputDashboard() {
               kicker="Co-authorship reach"
               title="International collaborators"
               hint={`${countryName(country)} excluded from list`}
+              count={panelN('collaborators')?.count}
+              countLabel={panelN('collaborators')?.truncated ? 'co-author countries · capped at 200' : 'co-author countries'}
             />
             <ChartFrame
               status={state.collaborators?.status}
@@ -2471,6 +2631,8 @@ export default function ResearchOutputDashboard() {
               kicker="Mission alignment"
               title="UN Sustainable Development Goals"
               hint="OpenAlex SDG classifier"
+              count={panelN('sdgs')?.count}
+              countLabel="SDGs covered"
             />
             <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
               <HBar
@@ -2495,6 +2657,8 @@ export default function ResearchOutputDashboard() {
               kicker="Funding landscape"
               title="Acknowledged funders"
               hint="From grants metadata; coverage is partial"
+              count={panelN('funders')?.count}
+              countLabel={panelN('funders')?.truncated ? 'funders shown · capped at 200' : 'distinct funders'}
             />
             <ChartFrame
               status={state.funders?.status}
@@ -2522,6 +2686,8 @@ export default function ResearchOutputDashboard() {
               kicker="Visibility"
               title="Most-cited works in selection"
               hint="Live ranking; very recent works under-cite"
+              count={state.topWorks?.data ? state.topWorks.data.length : null}
+              countLabel="top works ranked"
             />
             <p
               className="-mt-2 mb-4 max-w-3xl"
