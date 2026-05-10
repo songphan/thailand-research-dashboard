@@ -1190,24 +1190,290 @@ const INSTITUTION_TYPES = [
   { key: 'other',      label: 'Other' },
 ];
 
-// Education-subcategory derivation. OpenAlex doesn't expose this directly, so we
-// classify by keywords in the institution display_name. Order matters: more specific
-// patterns come first. Falls back to 'other-education' for anything not matched.
+// MHESI 7-bucket classification of Thai higher education institutions.
+// Source: Thailand_Higher_Education_Institutions.xlsx (May 2026), compiled
+// from MHESI references and the Wikipedia categorized listing. 233 entries.
+// Buckets: public, rajabhat, rajamangala, private, military_police,
+// community, other_hei. The mapping is consulted only for institutions
+// whose OpenAlex `country_code` is TH and `type` is `education`.
 const EDUCATION_SUBCATEGORIES = [
-  { key: 'university',     label: 'University',         test: (n) => /\b(university|universiti|universität|universidad|université|universita|มหาวิทยาลัย)\b/i.test(n) },
-  { key: 'institute',      label: 'Institute',          test: (n) => /\b(institute of technology|technological institute|polytechnic|institute)\b/i.test(n) },
-  { key: 'college',        label: 'College',            test: (n) => /\b(college|วิทยาลัย)\b/i.test(n) },
-  { key: 'school',         label: 'School',             test: (n) => /\b(school|academy|conservatory)\b/i.test(n) },
-  { key: 'medical-school', label: 'Medical school',     test: (n) => /\b(medical|medicine)\s+(school|college|center|centre)\b/i.test(n) },
-  { key: 'research-ed',    label: 'Research centre',    test: (n) => /\b(research|laboratory|laboratorium|center|centre)\b/i.test(n) },
+  { key: 'public',          label: 'Public Universities',                    color: '#1f3a5f' },
+  { key: 'rajabhat',        label: 'Rajabhat Universities',                  color: '#7a2e3e' },
+  { key: 'rajamangala',     label: 'Rajamangala Universities of Technology', color: '#2c5f5d' },
+  { key: 'private',         label: 'Private Universities',                   color: '#b88a3e' },
+  { key: 'military_police', label: 'Military and Police',                    color: '#5d3a5a' },
+  { key: 'community',       label: 'Community Colleges',                     color: '#4a6b3a' },
+  { key: 'other_hei',       label: 'Other Higher Education',                 color: '#a04f1f' },
+  { key: 'unclassified',    label: 'Other / unclassified',                   color: '#6b6155' },
 ];
-const subcategoryFor = (name) => {
-  if (!name) return 'other-education';
-  for (const sc of EDUCATION_SUBCATEGORIES) {
-    if (sc.test(name)) return sc.key;
-  }
-  return 'other-education';
+
+// Map normalized institution name → subcategory key.
+const TH_HEI_SUBCATEGORY_MAP = new Map([
+  // public: 41
+  ['bunditpatanasilpa institute', 'public'],
+  ['burapha university', 'public'],
+  ['chiang mai university', 'public'],
+  ['chitralada technology institute', 'public'],
+  ['chulabhorn graduate institute', 'public'],
+  ['chulalongkorn university', 'public'],
+  ['hrh princess chulabhorn college of medical science', 'public'],
+  ['kalasin university', 'public'],
+  ['kasetsart university', 'public'],
+  ['khon kaen university', 'public'],
+  ['king mongkuts institute of technology ladkrabang', 'public'],
+  ['king mongkuts university of technology north bangkok', 'public'],
+  ['king mongkuts university of technology thonburi', 'public'],
+  ['mae fah luang university', 'public'],
+  ['maejo university', 'public'],
+  ['mahachulalongkornrajavidyalaya university', 'public'],
+  ['mahamakut buddhist university', 'public'],
+  ['mahasarakham university', 'public'],
+  ['mahidol university', 'public'],
+  ['nakhon phanom university', 'public'],
+  ['naresuan university', 'public'],
+  ['national institute of development administration', 'public'],
+  ['navamindradhiraj university', 'public'],
+  ['pathumwan institute of technology', 'public'],
+  ['praboromarajchanok institute', 'public'],
+  ['prince of songkla university', 'public'],
+  ['princess galyani vadhana institute of music', 'public'],
+  ['princess of naradhiwas university', 'public'],
+  ['ramkhamhaeng university', 'public'],
+  ['silpakorn university', 'public'],
+  ['srinakharinwirot university', 'public'],
+  ['srisavarindhira thai red cross institute of nursing', 'public'],
+  ['suan dusit university', 'public'],
+  ['sukhothai thammathirat open university', 'public'],
+  ['suranaree university of technology', 'public'],
+  ['thailand national sports university', 'public'],
+  ['thaksin university', 'public'],
+  ['thammasat university', 'public'],
+  ['ubon ratchathani university', 'public'],
+  ['university of phayao', 'public'],
+  ['walailak university', 'public'],
+  // rajabhat: 38
+  ['bansomdejchaopraya rajabhat university', 'rajabhat'],
+  ['buri ram rajabhat university', 'rajabhat'],
+  ['chaiyaphum rajabhat university', 'rajabhat'],
+  ['chandrakasem rajabhat university', 'rajabhat'],
+  ['chiang mai rajabhat university', 'rajabhat'],
+  ['chiang rai rajabhat university', 'rajabhat'],
+  ['dhonburi rajabhat university', 'rajabhat'],
+  ['kamphaeng phet rajabhat university', 'rajabhat'],
+  ['kanchanaburi rajabhat university', 'rajabhat'],
+  ['lampang rajabhat university', 'rajabhat'],
+  ['loei rajabhat university', 'rajabhat'],
+  ['maha sarakham rajabhat university', 'rajabhat'],
+  ['muban chom bung rajabhat university', 'rajabhat'],
+  ['nakhon pathom rajabhat university', 'rajabhat'],
+  ['nakhon ratchasima rajabhat university', 'rajabhat'],
+  ['nakhon sawan rajabhat university', 'rajabhat'],
+  ['nakhon si thammarat rajabhat university', 'rajabhat'],
+  ['phetchabun rajabhat university', 'rajabhat'],
+  ['phetchaburi rajabhat university', 'rajabhat'],
+  ['phranakhon rajabhat university', 'rajabhat'],
+  ['phranakhon si ayutthaya rajabhat university', 'rajabhat'],
+  ['phuket rajabhat university', 'rajabhat'],
+  ['pibulsongkram rajabhat university', 'rajabhat'],
+  ['rajanagarindra rajabhat university', 'rajabhat'],
+  ['rambhai barni rajabhat university', 'rajabhat'],
+  ['roi et rajabhat university', 'rajabhat'],
+  ['sakon nakhon rajabhat university', 'rajabhat'],
+  ['sisaket rajabhat university', 'rajabhat'],
+  ['songkhla rajabhat university', 'rajabhat'],
+  ['suan sunandha rajabhat university', 'rajabhat'],
+  ['suratthani rajabhat university', 'rajabhat'],
+  ['surin rajabhat university', 'rajabhat'],
+  ['thepsatri rajabhat university', 'rajabhat'],
+  ['ubon ratchathani rajabhat university', 'rajabhat'],
+  ['udon thani rajabhat university', 'rajabhat'],
+  ['uttaradit rajabhat university', 'rajabhat'],
+  ['valaya alongkorn rajabhat university', 'rajabhat'],
+  ['yala rajabhat university', 'rajabhat'],
+  // rajamangala: 9
+  ['rajamangala university of technology isan', 'rajamangala'],
+  ['rajamangala university of technology krungthep', 'rajamangala'],
+  ['rajamangala university of technology lanna', 'rajamangala'],
+  ['rajamangala university of technology phra nakhon', 'rajamangala'],
+  ['rajamangala university of technology rattanakosin', 'rajamangala'],
+  ['rajamangala university of technology srivijaya', 'rajamangala'],
+  ['rajamangala university of technology suvarnabhumi', 'rajamangala'],
+  ['rajamangala university of technology tawan ok', 'rajamangala'],
+  ['rajamangala university of technology thanyaburi', 'rajamangala'],
+  // private: 104
+  ['arsom silp institute of the arts', 'private'],
+  ['asia pacific international university', 'private'],
+  ['assumption university', 'private'],
+  ['bangkok arts and crafts college', 'private'],
+  ['bangkok school of management', 'private'],
+  ['bangkok suvarnabhumi university', 'private'],
+  ['bangkok university', 'private'],
+  ['bangkokthonburi university', 'private'],
+  ['banglamung inter tech technological college', 'private'],
+  ['banharn jamsai polytechnic college', 'private'],
+  ['boonthavorn technology college', 'private'],
+  ['bundit boriharnthurakit college', 'private'],
+  ['cambridge college thailand', 'private'],
+  ['chalermkarnchana university', 'private'],
+  ['chaopraya university', 'private'],
+  ['chiangrai college', 'private'],
+  ['chonburi vocational college', 'private'],
+  ['christian university', 'private'],
+  ['college institute', 'private'],
+  ['college of asian scholars', 'private'],
+  ['dhurakij pundit university', 'private'],
+  ['don bosco technological college', 'private'],
+  ['dusit thani college', 'private'],
+  ['e sarn university', 'private'],
+  ['eastern asia university', 'private'],
+  ['eastern university of management and technology', 'private'],
+  ['ekawan vocational college', 'private'],
+  ['far eastern university', 'private'],
+  ['fatoni university', 'private'],
+  ['galileo maritime academy', 'private'],
+  ['hatyai university', 'private'],
+  ['huachiew chalermprakiet university', 'private'],
+  ['institute college', 'private'],
+  ['institute of technology ayothaya', 'private'],
+  ['international buddhist college', 'private'],
+  ['international hotel and tourism industry management school', 'private'],
+  ['jathupat suksasongkhro technological college', 'private'],
+  ['kantana institute', 'private'],
+  ['kantaralak technical college', 'private'],
+  ['kasem bundit university', 'private'],
+  ['khukhan industrial and community education college', 'private'],
+  ['krirk university', 'private'],
+  ['lampang inter tech college', 'private'],
+  ['learning institute for everyone', 'private'],
+  ['loengnoktha industrial and community education college', 'private'],
+  ['lumnamping college', 'private'],
+  ['mahanakorn university of technology', 'private'],
+  ['nakhonratchasima college', 'private'],
+  ['nakhonratchasima polytechnic college', 'private'],
+  ['namphong technical college', 'private'],
+  ['nation university', 'private'],
+  ['nonthaburi technical college', 'private'],
+  ['north bangkok university', 'private'],
+  ['north chiang mai university', 'private'],
+  ['north eastern university', 'private'],
+  ['panyapiwat institute of management', 'private'],
+  ['pathumthani technical college', 'private'],
+  ['pathumthani university', 'private'],
+  ['payap university', 'private'],
+  ['phanomwan college', 'private'],
+  ['phatthalung technical college', 'private'],
+  ['phayakkhaphum phisai industrial and community education college', 'private'],
+  ['phetchaburi polytechnic college', 'private'],
+  ['phitsanulok university', 'private'],
+  ['raffles international college', 'private'],
+  ['raffles international college bangkok', 'private'],
+  ['rajapark institute', 'private'],
+  ['rakthai namyuen business administration technological college', 'private'],
+  ['rangsit university', 'private'],
+  ['ranong technical college', 'private'],
+  ['ratchathani university', 'private'],
+  ['rattana bundit university', 'private'],
+  ['sae institute bangkok', 'private'],
+  ['saengtham college', 'private'],
+  ['saint johns university', 'private'],
+  ['saint louis college', 'private'],
+  ['samutprakan technical college', 'private'],
+  ['santapol college', 'private'],
+  ['shinawatra university', 'private'],
+  ['siam technology college', 'private'],
+  ['siam thanyaburi child and elderly care school', 'private'],
+  ['siam university', 'private'],
+  ['singburi vocational college', 'private'],
+  ['songphinong industrial and community education college', 'private'],
+  ['south east asia university', 'private'],
+  ['southeast bangkok college', 'private'],
+  ['southern college of technology', 'private'],
+  ['sripatum university', 'private'],
+  ['sriworakarn technology college', 'private'],
+  ['st theresa international college', 'private'],
+  ['stamford international university', 'private'],
+  ['suphanburi technical college', 'private'],
+  ['tapee university', 'private'],
+  ['thai nichi institute of technology', 'private'],
+  ['thonburi university', 'private'],
+  ['thongsook college', 'private'],
+  ['udonthani vocational college', 'private'],
+  ['unicentre college thailand', 'private'],
+  ['university of central thailand', 'private'],
+  ['university of the thai chamber of commerce', 'private'],
+  ['vidyasirimedhi institute of science and technology', 'private'],
+  ['vongchavalitkul university', 'private'],
+  ['webster university thailand', 'private'],
+  ['western university', 'private'],
+  // military_police: 11
+  ['chulachomklao royal military academy', 'military_police'],
+  ['command and general staff college', 'military_police'],
+  ['judge advocate general school thailand', 'military_police'],
+  ['national defence college', 'military_police'],
+  ['navaminda kasatriyadhiraj royal thai air force academy', 'military_police'],
+  ['phramongkutklao college of medicine', 'military_police'],
+  ['police nursing college', 'military_police'],
+  ['royal police cadet academy', 'military_police'],
+  ['royal thai air force nursing college', 'military_police'],
+  ['royal thai navy academy', 'military_police'],
+  ['royal thai navy college of nursing', 'military_police'],
+  // community: 22
+  ['buriram community college', 'community'],
+  ['community college', 'community'],
+  ['mae hong son community college', 'community'],
+  ['mukdahan community college', 'community'],
+  ['nan community college', 'community'],
+  ['narathiwat community college', 'community'],
+  ['nong bua lamphu community college', 'community'],
+  ['pattani community college', 'community'],
+  ['phang nga community college', 'community'],
+  ['phichit community college', 'community'],
+  ['phrae community college', 'community'],
+  ['ranong community college', 'community'],
+  ['sa kaeo community college', 'community'],
+  ['samut sakhon community college', 'community'],
+  ['satun community college', 'community'],
+  ['songkhla community college', 'community'],
+  ['sukhothai community college', 'community'],
+  ['tak community college', 'community'],
+  ['trat community college', 'community'],
+  ['uthai thani community college', 'community'],
+  ['yala community college', 'community'],
+  ['yasothon community college', 'community'],
+  // other_hei: 8
+  ['amata university', 'other_hei'],
+  ['asian institute of hospitality management', 'other_hei'],
+  ['asian institute of technology', 'other_hei'],
+  ['civil aviation training center', 'other_hei'],
+  ['cmkl university', 'other_hei'],
+  ['irrigation college', 'other_hei'],
+  ['merchant marine training center', 'other_hei'],
+  ['supervisory unit', 'other_hei'],
+]);
+
+// Normalize institution name for matching: lowercase, strip punctuation, collapse whitespace.
+// Mirrors the Python normalizer used to build TH_HEI_SUBCATEGORY_MAP.
+const normalizeInstitutionName = (name) => {
+  if (!name) return '';
+  return String(name)
+    .toLowerCase()
+    .replace(/['\u2019]/g, '')                  // apostrophes
+    .replace(/[^a-z0-9\u0e00-\u0e7f\s]/g, ' ')  // strip punctuation, keep Thai
+    .replace(/\s+/g, ' ')
+    .trim();
 };
+
+// Look up the MHESI subcategory for a Thai institution by name. Falls back
+// to 'unclassified' when the name isn't in the canonical mapping. The OpenAlex
+// display name often varies slightly from the official name (e.g. punctuation,
+// abbreviation order), so a few institutions may land in 'unclassified' even
+// when they should belong to a known bucket. To fix a specific miss, add the
+// normalized OpenAlex name to TH_HEI_SUBCATEGORY_MAP above.
+const subcategoryFor = (name) => {
+  const normalized = normalizeInstitutionName(name);
+  return TH_HEI_SUBCATEGORY_MAP.get(normalized) || 'unclassified';
+};
+
 // Order is deliberately not alphabetical; we list ASEAN+major research nations first
 // for quick access at the top of the dropdown, then alphabetise the rest.
 const FEATURED_COUNTRIES = [
@@ -1488,17 +1754,15 @@ export default function ResearchOutputDashboard() {
     return filtered;
   }, [state.institutions?.data, instTypeFilter, instSubcategoryFilter]);
 
-  // Available subcategories: only show subcategory pills if the user has selected
-  // 'education' as the type filter (or if we have any education institutions in
-  // the data, which we do by default).
+  // Available education-subcategory pills: only those actually present in the
+  // current data set, in canonical (MHESI) display order.
   const subcategoriesPresent = useMemo(() => {
     const all = state.institutions?.data || [];
     const set = new Set();
     for (const d of all) {
       if (d.type === 'education' && d.subcategory) set.add(d.subcategory);
     }
-    return EDUCATION_SUBCATEGORIES.filter((sc) => set.has(sc.key))
-      .concat(set.has('other-education') ? [{ key: 'other-education', label: 'Other education' }] : []);
+    return EDUCATION_SUBCATEGORIES.filter((sc) => set.has(sc.key));
   }, [state.institutions?.data]);
 
   // Reset subcategory filter when type filter changes away from 'education' or 'all'.
