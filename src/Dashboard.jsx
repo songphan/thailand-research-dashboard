@@ -478,6 +478,7 @@ const HBar = ({
         fill={color}
         style={{ fontFamily: FONT_BODY, fontSize: 11 }}
       >
+        <title>{payload.value}</title>
         {payload.value}
       </text>
     );
@@ -2113,7 +2114,7 @@ export default function ResearchOutputDashboard() {
             const type = inst.type || 'other';
             return {
               key: inst.id,
-              label: cleanLabel(inst.display_name, 38),
+              label: inst.display_name || 'Unknown',
               fullLabel: inst.display_name,
               value,
               country: inst.country_code,
@@ -2473,7 +2474,15 @@ export default function ResearchOutputDashboard() {
                 color={PALETTE.navy}
                 onBarClick={onPick('institutions')}
                 selectedKeys={selKeys('institutions')}
-                yAxisWidth={300}
+                yAxisWidth={(() => {
+                  // Size the y-axis to fit the longest visible label, with a sensible
+                  // cap so very long names don't push the bar plot off-screen. At
+                  // 11px IBM Plex Sans, the average glyph is ~6.2px wide, so the
+                  // formula approximates the rendered width.
+                  const visible = institutionsFiltered.slice(0, limitFor('institutions'));
+                  const longest = visible.reduce((m, d) => Math.max(m, (d.label || '').length), 0);
+                  return Math.min(420, Math.max(220, Math.round(longest * 6.2) + 16));
+                })()}
                 tickFillFn={(d) => {
                   // Education-typed institutions: use the MHESI subcategory colour.
                   // Other types: use the type's own colour. Both come from the same
