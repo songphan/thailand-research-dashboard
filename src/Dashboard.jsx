@@ -25,7 +25,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // burning your daily credits, which OpenAlex's per-IP rate limit largely
 // prevents anyway). If you'd rather hide the key, the proper path is a
 // small backend proxy that adds the key server-side.
-const OPENALEX_API_KEY = 'wPzRa7six3VGUf4dYxNYmv'; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
+const OPENALEX_API_KEY = ''; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -297,6 +297,28 @@ async function fetchInstitutionsMetadata(ids, chunkSize = 40) {
   );
 }
 
+// Paginate group_by results past OpenAlex's 200-per-page cap using their
+// group_by_continuation_token. We cap at maxPages to avoid runaway loops.
+// The API returns groups in descending count order, so the first 200 covers
+// the bulk of the distribution; pagination matters for long-tail dimensions
+// where many entities share small counts (e.g. all Thai institutions).
+async function fetchAllGroups(filterStr, groupBy, maxPages = 5) {
+  const all = [];
+  let token = null;
+  for (let page = 0; page < maxPages; page++) {
+    const tokenParam = token ? `&group_by_continuation_token=${encodeURIComponent(token)}` : '';
+    const url = withMailto(
+      `${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=200${tokenParam}`
+    );
+    const j = await fetchJson(url);
+    const batch = j.group_by || [];
+    all.push(...batch);
+    token = j.group_by_continuation_token;
+    if (!token || batch.length === 0) break;
+  }
+  return all;
+}
+
 const Card = ({ children, className = '', style = {} }) => (
   <div
     className={`rounded-md ${className}`}
@@ -553,6 +575,24 @@ const Donut = ({ data, height = 280, colorMap, onSliceClick, selectedKeys = [] }
     </div>
   );
 };
+
+// Small toggle pill used for the institution type/subcategory filters.
+const InstPill = ({ active, onClick, label, subtle = false }) => (
+  <button
+    onClick={onClick}
+    className="rounded-sm px-2 py-1 transition-colors"
+    style={{
+      border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
+      background: active ? PALETTE.ink : 'transparent',
+      color: active ? PALETTE.cream : (subtle ? PALETTE.muted : PALETTE.charcoal),
+      fontFamily: FONT_MONO,
+      fontSize: subtle ? 10 : 11,
+      letterSpacing: '0.04em',
+    }}
+  >
+    {label}
+  </button>
+);
 
 const StatCard = ({ kicker, value, sub, accent, loading }) => (
   <Card className="p-5">
@@ -1136,7 +1176,38 @@ const TableModal = ({
   );
 };
 
-// All ISO-3166-1 alpha-2 country codes that OpenAlex tracks for institutional affiliation.
+// OpenAlex institution.type values (per https://docs.openalex.org/api-entities/institutions).
+// We surface these as filter pills above the institutions chart.
+const INSTITUTION_TYPES = [
+  { key: 'education',  label: 'Education' },
+  { key: 'healthcare', label: 'Healthcare' },
+  { key: 'government', label: 'Government' },
+  { key: 'company',    label: 'Company' },
+  { key: 'nonprofit',  label: 'Nonprofit' },
+  { key: 'facility',   label: 'Facility' },
+  { key: 'archive',    label: 'Archive' },
+  { key: 'funder',     label: 'Funder' },
+  { key: 'other',      label: 'Other' },
+];
+
+// Education-subcategory derivation. OpenAlex doesn't expose this directly, so we
+// classify by keywords in the institution display_name. Order matters: more specific
+// patterns come first. Falls back to 'other-education' for anything not matched.
+const EDUCATION_SUBCATEGORIES = [
+  { key: 'university',     label: 'University',         test: (n) => /\b(university|universiti|universität|universidad|université|universita|มหาวิทยาลัย)\b/i.test(n) },
+  { key: 'institute',      label: 'Institute',          test: (n) => /\b(institute of technology|technological institute|polytechnic|institute)\b/i.test(n) },
+  { key: 'college',        label: 'College',            test: (n) => /\b(college|วิทยาลัย)\b/i.test(n) },
+  { key: 'school',         label: 'School',             test: (n) => /\b(school|academy|conservatory)\b/i.test(n) },
+  { key: 'medical-school', label: 'Medical school',     test: (n) => /\b(medical|medicine)\s+(school|college|center|centre)\b/i.test(n) },
+  { key: 'research-ed',    label: 'Research centre',    test: (n) => /\b(research|laboratory|laboratorium|center|centre)\b/i.test(n) },
+];
+const subcategoryFor = (name) => {
+  if (!name) return 'other-education';
+  for (const sc of EDUCATION_SUBCATEGORIES) {
+    if (sc.test(name)) return sc.key;
+  }
+  return 'other-education';
+};
 // Order is deliberately not alphabetical; we list ASEAN+major research nations first
 // for quick access at the top of the dropdown, then alphabetise the rest.
 const FEATURED_COUNTRIES = [
@@ -1392,9 +1463,50 @@ export default function ResearchOutputDashboard() {
   const [displayLimits, setDisplayLimits] = useState(DEFAULT_LIMITS);
   const [tableOpenDim, setTableOpenDim] = useState(null);
 
+  // Local filter state for the institutions chart. These don't go through OpenAlex;
+  // we already have type and subcategory in the metadata, so we filter in JS.
+  // 'all' means no narrowing applied.
+  const [instTypeFilter, setInstTypeFilter] = useState('all');
+  const [instSubcategoryFilter, setInstSubcategoryFilter] = useState('all');
+
   const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
   const sliceFor = (dim) => (state[dim]?.data || []).slice(0, limitFor(dim));
+
+  // Apply local type/subcategory filters to the institutions chart data.
+  // The full list (post-pagination) is in state.institutions.data; we narrow it
+  // in-memory rather than re-querying OpenAlex.
+  const institutionsFiltered = useMemo(() => {
+    const all = state.institutions?.data || [];
+    let filtered = all;
+    if (instTypeFilter !== 'all') {
+      filtered = filtered.filter((d) => d.type === instTypeFilter);
+    }
+    if (instSubcategoryFilter !== 'all') {
+      filtered = filtered.filter((d) => d.subcategory === instSubcategoryFilter);
+    }
+    return filtered;
+  }, [state.institutions?.data, instTypeFilter, instSubcategoryFilter]);
+
+  // Available subcategories: only show subcategory pills if the user has selected
+  // 'education' as the type filter (or if we have any education institutions in
+  // the data, which we do by default).
+  const subcategoriesPresent = useMemo(() => {
+    const all = state.institutions?.data || [];
+    const set = new Set();
+    for (const d of all) {
+      if (d.type === 'education' && d.subcategory) set.add(d.subcategory);
+    }
+    return EDUCATION_SUBCATEGORIES.filter((sc) => set.has(sc.key))
+      .concat(set.has('other-education') ? [{ key: 'other-education', label: 'Other education' }] : []);
+  }, [state.institutions?.data]);
+
+  // Reset subcategory filter when type filter changes away from 'education' or 'all'.
+  useEffect(() => {
+    if (instTypeFilter !== 'all' && instTypeFilter !== 'education') {
+      setInstSubcategoryFilter('all');
+    }
+  }, [instTypeFilter]);
 
   const toggleFilter = (dim, item) => {
     setFilters((prev) => {
@@ -1567,29 +1679,47 @@ export default function ResearchOutputDashboard() {
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
     );
 
-    run('institutions', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), async (j) => {
-      const top = j.group_by || [];
-      if (top.length === 0) return [];
-      const ids = top.map((g) => stripPrefix(g.key));
-      const insts = await fetchInstitutionsMetadata(ids);
-      const byId = {};
-      insts.forEach((inst) => {
-        byId[stripPrefix(inst.id)] = inst;
-      });
-      return top
-        .map((g) => {
-          const id = stripPrefix(g.key);
-          const m = byId[id];
-          return {
-            key: g.key,
-            label: cleanLabel(g.key_display_name, 38),
-            value: g.count,
-            country: m?.country_code,
-            type: m?.type,
-          };
-        })
-        .filter((d) => d.country === country);
-    });
+    // Institutions: paginate the group_by past the 200-per-page cap so we capture
+    // all Thai institutions (as of late 2025 there are ~260+). The metadata lookup
+    // also batched, so we end up with full type and subcategory tags for filtering.
+    setPanel('institutions', { status: 'loading', error: null });
+    (async () => {
+      try {
+        const top = await fetchAllGroups(filterStrings.institutions, 'authorships.institutions.id', 5);
+        if (cancelled) return;
+        if (top.length === 0) {
+          setPanel('institutions', { status: 'ready', data: [] });
+          return;
+        }
+        const ids = top.map((g) => stripPrefix(g.key));
+        const insts = await fetchInstitutionsMetadata(ids);
+        if (cancelled) return;
+        const byId = {};
+        insts.forEach((inst) => {
+          byId[stripPrefix(inst.id)] = inst;
+        });
+        const data = top
+          .map((g) => {
+            const id = stripPrefix(g.key);
+            const m = byId[id];
+            const type = m?.type || 'other';
+            return {
+              key: g.key,
+              label: cleanLabel(g.key_display_name, 38),
+              fullLabel: m?.display_name || g.key_display_name,
+              value: g.count,
+              country: m?.country_code,
+              type,
+              subcategory: type === 'education' ? subcategoryFor(m?.display_name || g.key_display_name) : null,
+            };
+          })
+          .filter((d) => d.country === country);
+        setPanel('institutions', { status: 'ready', data });
+      } catch (e) {
+        if (cancelled) return;
+        setPanel('institutions', { status: 'error', error: e.message || 'Fetch failed' });
+      }
+    })();
 
     return () => { cancelled = true; };
   }, [year, refreshKey, filterStrings]);
@@ -1808,22 +1938,82 @@ export default function ResearchOutputDashboard() {
               icon={Building2}
               kicker="Producing institutions"
               title="Where the research happens"
-              hint={`Top ${countryName(country)} institutions · click to filter`}
+              hint={`All ${countryName(country)} institutions · click bar to filter dashboard`}
             />
+            {/* Type filter pills */}
+            <div className="mb-3 flex flex-wrap items-center gap-1.5">
+              <span
+                style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                className="uppercase mr-1"
+              >
+                Type
+              </span>
+              <InstPill
+                active={instTypeFilter === 'all'}
+                onClick={() => setInstTypeFilter('all')}
+                label="All types"
+              />
+              {INSTITUTION_TYPES.map((t) => {
+                const present = (state.institutions?.data || []).some((d) => d.type === t.key);
+                if (!present) return null;
+                return (
+                  <InstPill
+                    key={t.key}
+                    active={instTypeFilter === t.key}
+                    onClick={() => setInstTypeFilter(t.key)}
+                    label={t.label}
+                  />
+                );
+              })}
+            </div>
+            {/* Education subcategory pills, only shown when relevant */}
+            {(instTypeFilter === 'education' || instTypeFilter === 'all') && subcategoriesPresent.length > 0 && (
+              <div className="mb-3 flex flex-wrap items-center gap-1.5">
+                <span
+                  style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                  className="uppercase mr-1"
+                >
+                  {instTypeFilter === 'education' ? 'Education subtype' : 'Education subtype (optional)'}
+                </span>
+                <InstPill
+                  active={instSubcategoryFilter === 'all'}
+                  onClick={() => setInstSubcategoryFilter('all')}
+                  label="All"
+                  subtle
+                />
+                {subcategoriesPresent.map((sc) => (
+                  <InstPill
+                    key={sc.key}
+                    active={instSubcategoryFilter === sc.key}
+                    onClick={() => {
+                      setInstSubcategoryFilter(sc.key);
+                      // Auto-narrow type to education when picking a subcategory
+                      if (instTypeFilter === 'all') setInstTypeFilter('education');
+                    }}
+                    label={sc.label}
+                    subtle
+                  />
+                ))}
+              </div>
+            )}
             <ChartFrame
               status={state.institutions?.status}
               error={state.institutions?.error}
-              hint={`Filtered to country_code = ${country} after group-by lookup.`}
+              hint={
+                institutionsFiltered.length === 0 && (state.institutions?.data || []).length > 0
+                  ? 'No institutions match the active type/subcategory filter.'
+                  : `Showing ${institutionsFiltered.length} of ${(state.institutions?.data || []).length} ${countryName(country)} institutions.`
+              }
             >
               <HBar
-                data={sliceFor('institutions')}
+                data={institutionsFiltered.slice(0, limitFor('institutions'))}
                 color={PALETTE.navy}
                 accentTop
                 onBarClick={onPick('institutions')}
                 selectedKeys={selKeys('institutions')}
               />
               <ChartControls
-                total={(state.institutions?.data || []).length}
+                total={institutionsFiltered.length}
                 limit={limitFor('institutions')}
                 onLimitChange={setLimit('institutions')}
                 onOpenTable={() => setTableOpenDim('institutions')}
@@ -2221,7 +2411,9 @@ export default function ResearchOutputDashboard() {
         onClose={() => setTableOpenDim(null)}
         title={tableOpenDim ? (DIMENSIONS[tableOpenDim]?.label || tableOpenDim) : ''}
         kicker="Full data · sortable · exportable"
-        data={tableOpenDim ? (state[tableOpenDim]?.data || []) : []}
+        data={tableOpenDim === 'institutions'
+          ? institutionsFiltered
+          : (tableOpenDim ? (state[tableOpenDim]?.data || []) : [])}
         filterable={tableOpenDim ? !!DIMENSIONS[tableOpenDim]?.filterable : false}
         selectedKeys={tableOpenDim ? selKeys(tableOpenDim) : []}
         onToggleFilter={tableOpenDim && DIMENSIONS[tableOpenDim]?.filterable
