@@ -2026,43 +2026,50 @@ export default function ResearchOutputDashboard() {
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
     );
 
-    // Institutions: paginate the group_by past the 200-per-page cap so we capture
-    // all Thai institutions (as of late 2025 there are ~260+). The metadata lookup
-    // also batched, so we end up with full type and subcategory tags for filtering.
+    // Producing institutions: query the /institutions endpoint directly rather than
+    // group_by on /works. The works-group_by approach only returns the top 200 by
+    // count (or, when paged, returns alphabetically-sorted groups including foreign
+    // collaborators that dominate the alphabetical space). The institutions endpoint
+    // gives the canonical country list with year-specific counts in counts_by_year.
+    //
+    // Trade-off: this fetch ignores other filter chips (Field, Publisher, etc.).
+    // The institutions chart shows the full country roster for the active year so
+    // the institutional landscape is always visible. Other panels still respect all
+    // filter chips, so clicking through to drill into one institution still works.
     setPanel('institutions', { status: 'loading', error: null });
     (async () => {
       try {
-        const top = await fetchAllGroups(filterStrings.institutions, 'authorships.institutions.id');
-        if (cancelled) return;
-        if (top.length === 0) {
-          setPanel('institutions', { status: 'ready', data: [] });
-          return;
+        const allInsts = [];
+        for (let page = 1; page <= 5; page++) {
+          if (cancelled) return;
+          const url = withMailto(
+            `${OPENALEX_BASE}/institutions?filter=country_code:${country}` +
+            `&per-page=200&page=${page}` +
+            `&select=id,display_name,type,country_code,counts_by_year`
+          );
+          const j = await fetchJson(url);
+          if (cancelled) return;
+          const batch = j.results || [];
+          allInsts.push(...batch);
+          if (batch.length < 200) break;
         }
-        const ids = top.map((g) => stripPrefix(g.key));
-        const insts = await fetchInstitutionsMetadata(ids);
         if (cancelled) return;
-        const byId = {};
-        insts.forEach((inst) => {
-          byId[stripPrefix(inst.id)] = inst;
-        });
-        const data = top
-          .map((g) => {
-            const id = stripPrefix(g.key);
-            const m = byId[id];
-            const type = m?.type || 'other';
+        const data = allInsts
+          .map((inst) => {
+            const yearEntry = (inst.counts_by_year || []).find((c) => c.year === year);
+            const value = yearEntry?.works_count || 0;
+            const type = inst.type || 'other';
             return {
-              key: g.key,
-              label: cleanLabel(g.key_display_name, 38),
-              fullLabel: m?.display_name || g.key_display_name,
-              value: g.count,
-              country: m?.country_code,
+              key: inst.id,
+              label: cleanLabel(inst.display_name, 38),
+              fullLabel: inst.display_name,
+              value,
+              country: inst.country_code,
               type,
-              subcategory: type === 'education' ? subcategoryFor(m?.display_name || g.key_display_name) : null,
+              subcategory: type === 'education' ? subcategoryFor(inst.display_name) : null,
             };
           })
-          .filter((d) => d.country === country)
-          // Re-sort by count desc, since cursor-paginated group_by returns groups
-          // sorted by key (not by count) per OpenAlex's pagination behaviour.
+          .filter((d) => d.value > 0 && d.country === country)
           .sort((a, b) => b.value - a.value);
         setPanel('institutions', { status: 'ready', data });
       } catch (e) {
@@ -2332,7 +2339,7 @@ export default function ResearchOutputDashboard() {
               icon={Building2}
               kicker="Producing institutions"
               title="Where the research happens"
-              hint={`All ${countryName(country)} institutions · click bar to filter dashboard`}
+              hint={`Full ${countryName(country)} roster · counts via institutions endpoint`}
               count={
                 state.institutions?.status === 'ready'
                   ? (institutionsFiltered.length === (state.institutions?.data || []).length
