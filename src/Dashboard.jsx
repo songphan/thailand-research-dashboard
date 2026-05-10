@@ -440,7 +440,12 @@ const ChartFrame = ({ status, error, children, hint }) => {
 // unless explicitly overridden.
 const HBar = ({
   data, labelKey = 'label', valueKey = 'value', height,
-  color = PALETTE.navy, accentTop = false, onBarClick, selectedKeys = []
+  color = PALETTE.navy, accentTop = false, onBarClick, selectedKeys = [],
+  yAxisWidth = 170,
+  // tickFillFn: optional (datum) => color string. If provided, the y-axis label
+  // for each row is rendered in that color (used to color institution names by
+  // MHESI subcategory). Falls back to PALETTE.charcoal.
+  tickFillFn = null,
 }) => {
   if (!data || data.length === 0) {
     return <div style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-6">No data.</div>;
@@ -456,6 +461,28 @@ const HBar = ({
   };
   const handle = onBarClick ? (entry) => onBarClick(entry) : undefined;
 
+  // Build a label → color lookup if tickFillFn is supplied. Recharts y-axis
+  // doesn't pass the row datum to the tick renderer; only the label string.
+  // So we materialize the lookup once per render.
+  const labelColorMap = tickFillFn
+    ? Object.fromEntries(data.map((d) => [d[labelKey], tickFillFn(d)]))
+    : null;
+  const renderTick = ({ x, y, payload }) => {
+    const color = labelColorMap?.[payload.value] || PALETTE.charcoal;
+    return (
+      <text
+        x={x}
+        y={y}
+        dy={4}
+        textAnchor="end"
+        fill={color}
+        style={{ fontFamily: FONT_BODY, fontSize: 11 }}
+      >
+        {payload.value}
+      </text>
+    );
+  };
+
   return (
     <ResponsiveContainer width="100%" height={computedHeight}>
       <BarChart layout="vertical" data={data} margin={{ left: 8, right: 36, top: 4, bottom: 4 }}>
@@ -469,8 +496,8 @@ const HBar = ({
         <YAxis
           type="category"
           dataKey={labelKey}
-          width={170}
-          tick={{ fill: PALETTE.charcoal, fontFamily: FONT_BODY, fontSize: 11 }}
+          width={yAxisWidth}
+          tick={tickFillFn ? renderTick : { fill: PALETTE.charcoal, fontFamily: FONT_BODY, fontSize: 11 }}
           axisLine={false}
           tickLine={false}
           interval={0}
@@ -2432,9 +2459,31 @@ export default function ResearchOutputDashboard() {
               <HBar
                 data={institutionsFiltered.slice(0, limitFor('institutions'))}
                 color={PALETTE.navy}
-                accentTop
                 onBarClick={onPick('institutions')}
                 selectedKeys={selKeys('institutions')}
+                yAxisWidth={300}
+                tickFillFn={(d) => {
+                  // Education-type institutions inherit colour from MHESI subcategory.
+                  // Other types (healthcare, government, company, etc.) get a flat
+                  // colour matching their INSTITUTION_TYPES entry where defined,
+                  // falling back to charcoal so they stay readable.
+                  if (d.type === 'education' && d.subcategory) {
+                    const sc = EDUCATION_SUBCATEGORIES.find((s) => s.key === d.subcategory);
+                    if (sc) return sc.color;
+                  }
+                  // Type-level colours for non-education institutions
+                  const typeColors = {
+                    healthcare: PALETTE.burgundy,
+                    government: PALETTE.charcoal,
+                    company:    PALETTE.gold,
+                    nonprofit:  PALETTE.teal,
+                    facility:   PALETTE.muted,
+                    archive:    PALETTE.muted,
+                    funder:     PALETTE.rust,
+                    other:      PALETTE.muted,
+                  };
+                  return typeColors[d.type] || PALETTE.charcoal;
+                }}
               />
               <ChartControls
                 total={institutionsFiltered.length}
@@ -2442,6 +2491,47 @@ export default function ResearchOutputDashboard() {
                 onLimitChange={setLimit('institutions')}
                 onOpenTable={() => setTableOpenDim('institutions')}
               />
+              {/* Colour legend for y-axis labels: only show buckets present in the visible slice. */}
+              {(() => {
+                const visible = institutionsFiltered.slice(0, limitFor('institutions'));
+                const eduSubsPresent = new Set(visible.filter((d) => d.type === 'education' && d.subcategory).map((d) => d.subcategory));
+                const nonEduTypesPresent = new Set(visible.filter((d) => d.type !== 'education').map((d) => d.type));
+                const eduItems = EDUCATION_SUBCATEGORIES.filter((s) => eduSubsPresent.has(s.key));
+                const typeColors = {
+                  healthcare: { color: PALETTE.burgundy, label: 'Healthcare' },
+                  government: { color: PALETTE.charcoal, label: 'Government' },
+                  company:    { color: PALETTE.gold,     label: 'Company' },
+                  nonprofit:  { color: PALETTE.teal,     label: 'Nonprofit' },
+                  facility:   { color: PALETTE.muted,    label: 'Facility' },
+                  archive:    { color: PALETTE.muted,    label: 'Archive' },
+                  funder:     { color: PALETTE.rust,     label: 'Funder' },
+                  other:      { color: PALETTE.muted,    label: 'Other' },
+                };
+                const nonEduItems = INSTITUTION_TYPES
+                  .filter((t) => t.key !== 'education' && nonEduTypesPresent.has(t.key))
+                  .map((t) => ({ key: t.key, label: typeColors[t.key]?.label || t.label, color: typeColors[t.key]?.color || PALETTE.muted }));
+                const items = [...eduItems, ...nonEduItems];
+                if (items.length === 0) return null;
+                return (
+                  <div
+                    className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t pt-3"
+                    style={{ borderColor: PALETTE.rule }}
+                  >
+                    <span
+                      style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                      className="uppercase"
+                    >
+                      Label colour
+                    </span>
+                    {items.map((it) => (
+                      <span key={it.key} className="flex items-center gap-1.5" style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.charcoal }}>
+                        <span style={{ width: 10, height: 10, background: it.color, borderRadius: 1, display: 'inline-block', flex: 'none' }} />
+                        {it.label}
+                      </span>
+                    ))}
+                  </div>
+                );
+              })()}
             </ChartFrame>
           </Card>
 
