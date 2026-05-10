@@ -625,22 +625,29 @@ const Donut = ({ data, height = 280, colorMap, onSliceClick, selectedKeys = [] }
 };
 
 // Small toggle pill used for the institution type/subcategory filters.
-const InstPill = ({ active, onClick, label, subtle = false }) => (
-  <button
-    onClick={onClick}
-    className="rounded-sm px-2 py-1 transition-colors"
-    style={{
-      border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
-      background: active ? PALETTE.ink : 'transparent',
-      color: active ? PALETTE.cream : (subtle ? PALETTE.muted : PALETTE.charcoal),
-      fontFamily: FONT_MONO,
-      fontSize: subtle ? 10 : 11,
-      letterSpacing: '0.04em',
-    }}
-  >
-    {label}
-  </button>
-);
+// Filter pill for institution type/subcategory rows. The optional `color` prop
+// tints the pill: inactive pills show a border + text in that colour against a
+// transparent background; active pills fill in solidly so the choice is unambiguous.
+// Pills without a colour (the "All" pills) fall back to the dashboard's ink/cream.
+const InstPill = ({ active, onClick, label, subtle = false, color = null }) => {
+  const accent = color || PALETTE.ink;
+  return (
+    <button
+      onClick={onClick}
+      className="rounded-sm px-2 py-1 transition-colors"
+      style={{
+        border: `1px solid ${active ? accent : (color ? accent : PALETTE.rule)}`,
+        background: active ? accent : 'transparent',
+        color: active ? PALETTE.cream : (color ? accent : (subtle ? PALETTE.muted : PALETTE.charcoal)),
+        fontFamily: FONT_MONO,
+        fontSize: subtle ? 10 : 11,
+        letterSpacing: '0.04em',
+      }}
+    >
+      {label}
+    </button>
+  );
+};
 
 const StatCard = ({ kicker, value, sub, accent, loading }) => (
   <Card className="p-5">
@@ -1225,17 +1232,20 @@ const TableModal = ({
 };
 
 // OpenAlex institution.type values (per https://docs.openalex.org/api-entities/institutions).
-// We surface these as filter pills above the institutions chart.
+// We surface these as filter pills above the institutions chart, and the same colours
+// are used for the y-axis labels in the producing-institutions chart so the visual
+// association is direct. Education-typed pills use a neutral colour because the actual
+// signal sits one level down in the MHESI subcategories (which have their own colours).
 const INSTITUTION_TYPES = [
-  { key: 'education',  label: 'Education' },
-  { key: 'healthcare', label: 'Healthcare' },
-  { key: 'government', label: 'Government' },
-  { key: 'company',    label: 'Company' },
-  { key: 'nonprofit',  label: 'Nonprofit' },
-  { key: 'facility',   label: 'Facility' },
-  { key: 'archive',    label: 'Archive' },
-  { key: 'funder',     label: 'Funder' },
-  { key: 'other',      label: 'Other' },
+  { key: 'education',  label: 'Education',  color: '#1a1612' /* ink, see EDUCATION_SUBCATEGORIES for the per-bucket colours */ },
+  { key: 'healthcare', label: 'Healthcare', color: '#7a2e3e' /* burgundy */ },
+  { key: 'government', label: 'Government', color: '#3a342c' /* charcoal */ },
+  { key: 'company',    label: 'Company',    color: '#b88a3e' /* gold */ },
+  { key: 'nonprofit',  label: 'Nonprofit',  color: '#2c5f5d' /* teal */ },
+  { key: 'facility',   label: 'Facility',   color: '#6b6155' /* muted */ },
+  { key: 'archive',    label: 'Archive',    color: '#6b6155' /* muted */ },
+  { key: 'funder',     label: 'Funder',     color: '#a04f1f' /* rust */ },
+  { key: 'other',      label: 'Other',      color: '#6b6155' /* muted */ },
 ];
 
 // MHESI 7-bucket classification of Thai higher education institutions.
@@ -2413,6 +2423,7 @@ export default function ResearchOutputDashboard() {
                     active={instTypeFilter === t.key}
                     onClick={() => setInstTypeFilter(t.key)}
                     label={t.label}
+                    color={t.color}
                   />
                 );
               })}
@@ -2442,6 +2453,7 @@ export default function ResearchOutputDashboard() {
                       if (instTypeFilter === 'all') setInstTypeFilter('education');
                     }}
                     label={sc.label}
+                    color={sc.color}
                     subtle
                   />
                 ))}
@@ -2463,26 +2475,16 @@ export default function ResearchOutputDashboard() {
                 selectedKeys={selKeys('institutions')}
                 yAxisWidth={300}
                 tickFillFn={(d) => {
-                  // Education-type institutions inherit colour from MHESI subcategory.
-                  // Other types (healthcare, government, company, etc.) get a flat
-                  // colour matching their INSTITUTION_TYPES entry where defined,
-                  // falling back to charcoal so they stay readable.
+                  // Education-typed institutions: use the MHESI subcategory colour.
+                  // Other types: use the type's own colour. Both come from the same
+                  // arrays (EDUCATION_SUBCATEGORIES, INSTITUTION_TYPES) that drive
+                  // the pill colours, so the visual lookup is self-consistent.
                   if (d.type === 'education' && d.subcategory) {
                     const sc = EDUCATION_SUBCATEGORIES.find((s) => s.key === d.subcategory);
                     if (sc) return sc.color;
                   }
-                  // Type-level colours for non-education institutions
-                  const typeColors = {
-                    healthcare: PALETTE.burgundy,
-                    government: PALETTE.charcoal,
-                    company:    PALETTE.gold,
-                    nonprofit:  PALETTE.teal,
-                    facility:   PALETTE.muted,
-                    archive:    PALETTE.muted,
-                    funder:     PALETTE.rust,
-                    other:      PALETTE.muted,
-                  };
-                  return typeColors[d.type] || PALETTE.charcoal;
+                  const t = INSTITUTION_TYPES.find((it) => it.key === d.type);
+                  return t?.color || PALETTE.charcoal;
                 }}
               />
               <ChartControls
@@ -2491,47 +2493,6 @@ export default function ResearchOutputDashboard() {
                 onLimitChange={setLimit('institutions')}
                 onOpenTable={() => setTableOpenDim('institutions')}
               />
-              {/* Colour legend for y-axis labels: only show buckets present in the visible slice. */}
-              {(() => {
-                const visible = institutionsFiltered.slice(0, limitFor('institutions'));
-                const eduSubsPresent = new Set(visible.filter((d) => d.type === 'education' && d.subcategory).map((d) => d.subcategory));
-                const nonEduTypesPresent = new Set(visible.filter((d) => d.type !== 'education').map((d) => d.type));
-                const eduItems = EDUCATION_SUBCATEGORIES.filter((s) => eduSubsPresent.has(s.key));
-                const typeColors = {
-                  healthcare: { color: PALETTE.burgundy, label: 'Healthcare' },
-                  government: { color: PALETTE.charcoal, label: 'Government' },
-                  company:    { color: PALETTE.gold,     label: 'Company' },
-                  nonprofit:  { color: PALETTE.teal,     label: 'Nonprofit' },
-                  facility:   { color: PALETTE.muted,    label: 'Facility' },
-                  archive:    { color: PALETTE.muted,    label: 'Archive' },
-                  funder:     { color: PALETTE.rust,     label: 'Funder' },
-                  other:      { color: PALETTE.muted,    label: 'Other' },
-                };
-                const nonEduItems = INSTITUTION_TYPES
-                  .filter((t) => t.key !== 'education' && nonEduTypesPresent.has(t.key))
-                  .map((t) => ({ key: t.key, label: typeColors[t.key]?.label || t.label, color: typeColors[t.key]?.color || PALETTE.muted }));
-                const items = [...eduItems, ...nonEduItems];
-                if (items.length === 0) return null;
-                return (
-                  <div
-                    className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t pt-3"
-                    style={{ borderColor: PALETTE.rule }}
-                  >
-                    <span
-                      style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
-                      className="uppercase"
-                    >
-                      Label colour
-                    </span>
-                    {items.map((it) => (
-                      <span key={it.key} className="flex items-center gap-1.5" style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.charcoal }}>
-                        <span style={{ width: 10, height: 10, background: it.color, borderRadius: 1, display: 'inline-block', flex: 'none' }} />
-                        {it.label}
-                      </span>
-                    ))}
-                  </div>
-                );
-              })()}
             </ChartFrame>
           </Card>
 
