@@ -1225,7 +1225,6 @@ const EDUCATION_SUBCATEGORIES = [
   { key: 'military_police', label: 'Military and Police',                    color: '#5d3a5a' },
   { key: 'community',       label: 'Community Colleges',                     color: '#4a6b3a' },
   { key: 'other_hei',       label: 'Other Higher Education',                 color: '#a04f1f' },
-  { key: 'unclassified',    label: 'Other / unclassified',                   color: '#6b6155' },
 ];
 
 // Map normalized institution name → subcategory key.
@@ -1470,6 +1469,16 @@ const TH_HEI_SUBCATEGORY_MAP = new Map([
   ['irrigation college', 'other_hei'],
   ['merchant marine training center', 'other_hei'],
   ['supervisory unit', 'other_hei'],
+  // Overrides: OpenAlex display names that differ from the canonical xlsx names
+  // (typos, alternate romanizations, missing diacritics, word-order differences).
+  ['rajamangala university of technology', 'rajamangala'],     // generic name used by OpenAlex for the system
+  ['rajabhat maha sarakhamuniversity', 'rajabhat'],            // OpenAlex name has missing space
+  ['buriram rajabhat university', 'rajabhat'],                 // canonical: 'buri ram'
+  ['rajabhat rajanagarindra university', 'rajabhat'],          // canonical word order: 'rajanagarindra rajabhat'
+  ['muban chombueng rajabhat university', 'rajabhat'],         // canonical romanization: 'chom bung'
+  ['surindra rajabhat university', 'rajabhat'],                // canonical: 'surin'
+  ['asian university', 'private'],                             // private
+  ['southeast asia university', 'private'],                    // canonical: 'south east asia'
 ]);
 
 // Normalize institution name for matching: lowercase, strip punctuation, collapse whitespace.
@@ -1484,15 +1493,15 @@ const normalizeInstitutionName = (name) => {
     .trim();
 };
 
-// Look up the MHESI subcategory for a Thai institution by name. Falls back
-// to 'unclassified' when the name isn't in the canonical mapping. The OpenAlex
-// display name often varies slightly from the official name (e.g. punctuation,
-// abbreviation order), so a few institutions may land in 'unclassified' even
-// when they should belong to a known bucket. To fix a specific miss, add the
+// Look up the MHESI subcategory for a Thai institution by name. Falls back to
+// 'other_hei' when the name isn't in the canonical mapping. The OpenAlex display
+// name often varies slightly from the official name (typos, alternate romanizations,
+// word-order differences), so unrecognised names get treated as Other Higher
+// Education by default. To pin a specific institution to a known bucket, add the
 // normalized OpenAlex name to TH_HEI_SUBCATEGORY_MAP above.
 const subcategoryFor = (name) => {
   const normalized = normalizeInstitutionName(name);
-  return TH_HEI_SUBCATEGORY_MAP.get(normalized) || 'unclassified';
+  return TH_HEI_SUBCATEGORY_MAP.get(normalized) || 'other_hei';
 };
 
 // Order is deliberately not alphabetical; we list ASEAN+major research nations first
