@@ -2026,16 +2026,22 @@ export default function ResearchOutputDashboard() {
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
     );
 
-    // Producing institutions: query the /institutions endpoint directly rather than
-    // group_by on /works. The works-group_by approach only returns the top 200 by
-    // count (or, when paged, returns alphabetically-sorted groups including foreign
-    // collaborators that dominate the alphabetical space). The institutions endpoint
-    // gives the canonical country list with year-specific counts in counts_by_year.
-    //
-    // Trade-off: this fetch ignores other filter chips (Field, Publisher, etc.).
-    // The institutions chart shows the full country roster for the active year so
-    // the institutional landscape is always visible. Other panels still respect all
-    // filter chips, so clicking through to drill into one institution still works.
+    return () => { cancelled = true; };
+  }, [year, refreshKey, filterStrings]);
+
+  // Producing institutions: fetched independently because it uses the /institutions
+  // endpoint (not works group_by), so it doesn't need to refire when filter chips
+  // change. Keeping this in its own useEffect breaks an infinite-render loop that
+  // would otherwise occur: filter chips → filterStrings change → main effect refires
+  // → institutions data array reference changes → syntheticInstitutionFilter
+  // recomputes → filterStrings change → loop. Decoupling stops the cascade.
+  useEffect(() => {
+    let cancelled = false;
+    const setPanel = (key, patch) => {
+      if (cancelled) return;
+      setState((s) => ({ ...s, [key]: { ...(s[key] || {}), ...patch } }));
+    };
+
     setPanel('institutions', { status: 'loading', error: null });
     (async () => {
       try {
@@ -2079,7 +2085,7 @@ export default function ResearchOutputDashboard() {
     })();
 
     return () => { cancelled = true; };
-  }, [year, refreshKey, filterStrings]);
+  }, [country, year, refreshKey]);
 
   const selKeys = (dim) => (filters[dim] || []).map((f) => f.value);
 
