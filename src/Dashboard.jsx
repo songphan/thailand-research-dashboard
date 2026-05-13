@@ -1935,7 +1935,13 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
     })();
 
     return () => { cancelled = true; };
-  }, [mode, baseFilterStr, countryInstitutionIds]);
+    // countryInstitutionIds is an array recreated on every parent render. Using
+    // it directly as a dep would trigger this effect on every render (since
+    // React compares deps by reference, not value), causing an infinite refetch
+    // loop. Joining to a string gives a stable value-based identity that only
+    // changes when the actual roster changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, baseFilterStr, countryInstitutionIds.join(',')]);
 
   // Lazy fetcher for mean-cites-per-work. Fires only when the user activates the
   // 'meanCites' sort mode and the cache for the active tab isn't populated. For
