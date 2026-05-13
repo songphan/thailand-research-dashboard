@@ -1704,7 +1704,7 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
 // or extra count vs expected) via toggles inside the section. The section
 // owns its own data fetch and only loads the active mode, so switching modes
 // triggers a reload rather than carrying both at once.
-const CitationInsightSection = ({ year, country, baseFilterStr, countryInstitutionIds = [] }) => {
+const CitationInsightSection = ({ year, country, baseFilterStr, countryInstitutionIds = [], activeFilters = {} }) => {
   // Minimum works per entity to qualify for ranking. Below this, share percentages
   // are too noisy to be meaningful (e.g. a field with 3 works at 100% cited).
   const MIN_WORKS_FOR_FIELD = 30;
@@ -2293,26 +2293,64 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
             On narrow screens they stack. */}
         {(() => {
           const tabConfig = {
-            institutions: { data: institutions, min: MIN_WORKS_FOR_INSTITUTION, singular: 'institution' },
-            fields:       { data: fields,       min: MIN_WORKS_FOR_FIELD,       singular: 'field' },
-            subfields:    { data: subfields,    min: MIN_WORKS_FOR_SUBFIELD,    singular: 'subfield' },
-            publishers:   { data: publishers,   min: MIN_WORKS_FOR_PUBLISHER,   singular: 'publisher' },
-            countries:    { data: countries,    min: MIN_WORKS_FOR_COUNTRY,     singular: 'collaborator country' },
+            institutions: { data: institutions, min: MIN_WORKS_FOR_INSTITUTION, singular: 'institution',          plural: 'institutions',          filterKey: 'institutions' },
+            fields:       { data: fields,       min: MIN_WORKS_FOR_FIELD,       singular: 'field',                plural: 'fields',                filterKey: 'fields' },
+            subfields:    { data: subfields,    min: MIN_WORKS_FOR_SUBFIELD,    singular: 'subfield',             plural: 'subfields',             filterKey: 'subfields' },
+            publishers:   { data: publishers,   min: MIN_WORKS_FOR_PUBLISHER,   singular: 'publisher',            plural: 'publishers',            filterKey: 'publishers' },
+            countries:    { data: countries,    min: MIN_WORKS_FOR_COUNTRY,     singular: 'collaborator country', plural: 'collaborator countries',filterKey: 'collaborators' },
           }[dimensionTab];
+          // Detect whether the active tab's dimension is also an active filter
+          // chip. If so, the chart shows co-occurring entities on those papers
+          // rather than just the filtered one, because OpenAlex's group_by
+          // returns every entity that appears on any work in the filtered set.
+          const filterChips = activeFilters[tabConfig.filterKey] || [];
+          const dimensionIsFiltered = filterChips.length > 0;
+          const filteredLabels = filterChips.map((c) => c.label || c.value).filter(Boolean);
+          const chipDescription = filteredLabels.length === 0
+            ? null
+            : filteredLabels.length === 1
+              ? filteredLabels[0]
+              : filteredLabels.length === 2
+                ? `${filteredLabels[0]} and ${filteredLabels[1]}`
+                : `${filteredLabels[0]}, ${filteredLabels[1]}, and ${filteredLabels.length - 2} more`;
           return (
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-5">
-              <div className="md:col-span-3">
+            <>
+              {dimensionIsFiltered && (
                 <div
-                  style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
-                  className="uppercase mb-2"
+                  className="mb-3 rounded-sm px-3 py-2"
+                  style={{
+                    background: PALETTE.cream,
+                    border: `1px solid ${PALETTE.rule}`,
+                    borderLeft: `3px solid ${PALETTE.gold}`,
+                  }}
                 >
-                  Distribution · each dot is one {tabConfig.singular}
+                  <div
+                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                    className="uppercase mb-0.5"
+                  >
+                    Note · co-occurring on filtered works
+                  </div>
+                  <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.45 }}>
+                    You've filtered to {chipDescription ? <strong>{chipDescription}</strong> : `a ${tabConfig.singular}`}.
+                    A single work can be linked to several {tabConfig.plural}, so the chart
+                    shows every {tabConfig.singular} that co-occurs on these works (not just the one you filtered by).
+                    Read this as a collaboration profile of the filtered subset rather than an exclusive view.
+                  </div>
                 </div>
-                <CitationReachScatter
-                  rows={tabConfig.data.rows || []}
-                  globalRate={tabConfig.data.globalRate || 0}
-                  mode={mode}
-                  minWorks={tabConfig.min}
+              )}
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-5">
+                <div className="md:col-span-3">
+                  <div
+                    style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                    className="uppercase mb-2"
+                  >
+                    Distribution · each dot is one {tabConfig.singular}
+                  </div>
+                  <CitationReachScatter
+                    rows={tabConfig.data.rows || []}
+                    globalRate={tabConfig.data.globalRate || 0}
+                    mode={mode}
+                    minWorks={tabConfig.min}
                   status={tabConfig.data.status}
                   sortMode={sortMode}
                   topN={TOP_N}
@@ -2334,6 +2372,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
                 {renderList(tabConfig.data, tabConfig.min)}
               </div>
             </div>
+            </>
           );
         })()}
       <div
@@ -4073,6 +4112,7 @@ export default function ResearchOutputDashboard() {
             country={country}
             baseFilterStr={filterStrings.all}
             countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
+            activeFilters={filters}
           />
 
           <Card className="p-5 lg:col-span-12">
