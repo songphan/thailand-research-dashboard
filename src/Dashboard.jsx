@@ -659,9 +659,8 @@ const InstPill = ({ active, onClick, label, subtle = false, color = null }) => {
 // Stacked horizontal bars showing cited vs uncited share for the active year
 // and up to five prior years. The active row sits at top in full rust + cream;
 // prior years sit below in a desaturated, lighter shade so the eye reads them
-// as comparison context rather than primary data. The active row's cited and
-// uncited counts are clickable when onDrillDown is provided.
-const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
+// as comparison context rather than primary data. Display-only.
+const CitationReachBars = ({ series, year, status, error }) => {
   if (status === 'error') {
     return (
       <div style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-3">
@@ -713,11 +712,6 @@ const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
         const citedTextColor = r.emphasis ? TEXT_ACTIVE_ON_CITED : TEXT_COMPARE;
         const uncitedTextColor = r.emphasis ? TEXT_ACTIVE_ON_UNCITED : TEXT_COMPARE;
 
-        const clickable = r.emphasis && !!onDrillDown;
-        const handleCited = clickable ? () => onDrillDown('cited') : undefined;
-        const handleUncited = clickable ? () => onDrillDown('uncited') : undefined;
-        const segmentCursor = clickable ? 'pointer' : 'default';
-
         return (
           <div key={r.year}>
             <div className="flex items-baseline justify-between">
@@ -764,7 +758,6 @@ const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
               aria-label={`${r.year}: ${fmtFull(r.cited)} cited (${citedPctStr}), ${fmtFull(r.uncited)} uncited (${uncitedPctStr}).`}
             >
               <div
-                onClick={handleCited}
                 style={{
                   width: `${citedPct * 100}%`,
                   background: citedBg,
@@ -777,21 +770,15 @@ const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
                   paddingLeft: r.emphasis ? 8 : 0,
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
-                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.15s',
-                  cursor: segmentCursor,
+                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)',
                 }}
-                title={clickable ? `Click to see top fields for cited works (${fmtFull(r.cited)})` : `Cited: ${fmtFull(r.cited)} (${citedPctStr})`}
-                onMouseEnter={(e) => { if (clickable) e.currentTarget.style.filter = 'brightness(1.08)'; }}
-                onMouseLeave={(e) => { if (clickable) e.currentTarget.style.filter = ''; }}
+                title={`Cited: ${fmtFull(r.cited)} (${citedPctStr})`}
               >
                 {r.emphasis && showCitedInline && (
-                  <span style={{ textDecoration: clickable ? 'underline' : 'none', textUnderlineOffset: 3 }}>
-                    {fmtFull(r.cited)} cited
-                  </span>
+                  <span>{fmtFull(r.cited)} cited</span>
                 )}
               </div>
               <div
-                onClick={handleUncited}
                 style={{
                   width: `${uncitedPct * 100}%`,
                   background: uncitedBg,
@@ -804,17 +791,12 @@ const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
                   paddingRight: r.emphasis ? 8 : 0,
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
-                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.15s',
-                  cursor: segmentCursor,
+                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)',
                 }}
-                title={clickable ? `Click to see top fields for uncited works (${fmtFull(r.uncited)})` : `Uncited: ${fmtFull(r.uncited)} (${uncitedPctStr})`}
-                onMouseEnter={(e) => { if (clickable) e.currentTarget.style.filter = 'brightness(0.96)'; }}
-                onMouseLeave={(e) => { if (clickable) e.currentTarget.style.filter = ''; }}
+                title={`Uncited: ${fmtFull(r.uncited)} (${uncitedPctStr})`}
               >
                 {r.emphasis && showUncitedInline && (
-                  <span style={{ textDecoration: clickable ? 'underline' : 'none', textUnderlineOffset: 3 }}>
-                    {fmtFull(r.uncited)} uncited
-                  </span>
+                  <span>{fmtFull(r.uncited)} uncited</span>
                 )}
               </div>
             </div>
@@ -844,17 +826,6 @@ const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
               Some of this gap reflects citation lag for recent years and will close as the corpus ages.
             </span>
           </span>
-        </div>
-      )}
-      {onDrillDown && active && (
-        <div
-          style={{
-            fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.1em',
-            color: PALETTE.muted, marginTop: 2,
-          }}
-          className="uppercase"
-        >
-          Tip · Click "{fmtFull(active.cited)} cited" or "{fmtFull(active.uncited)} uncited" to see top fields, subfields, and institutions by within-entity share
         </div>
       )}
     </div>
@@ -1639,7 +1610,7 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
           <div style={{ fontFamily: FONT_MONO, fontSize: 10, opacity: 0.85, marginTop: 2 }}>
             {(hover.share * 100).toFixed(1)}% · {fmtFull(hover.subset)} / {fmtFull(hover.total)}
             {hover.excess !== undefined && (
-              <span> · {hover.excess >= 0 ? '+' : ''}{Math.round(hover.excess).toLocaleString()} excess</span>
+              <span> · {hover.excess >= 0 ? '+' : ''}{Math.round(hover.excess).toLocaleString()} vs expected</span>
             )}
           </div>
         </div>
@@ -1648,33 +1619,37 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
   );
 };
 
-// Drill-down modal showing top fields, subfields, and institutions for the
-// cited or uncited subset of the active selection, ranked by within-entity SHARE
-// rather than raw count. For each entity (field / subfield / institution) we
+// Citation insight section showing top institutions, fields, subfields, and
+// publishers for the cited or uncited subset of the active selection, ranked
+// by within-entity share or by extra count vs expected. For each entity we
 // fetch the subset count (numerator) and the full count (denominator), compute
 // the share, and apply a minimum-works threshold so tiny entities with 2-of-3
-// works cited don't dominate the rankings. The modal closes on Esc or backdrop click.
-const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr, countryInstitutionIds = [] }) => {
+// works cited don't dominate the rankings. Renders inline as a dashboard card
+// rather than as a modal overlay.
+const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryInstitutionIds = [] }) => {
   // Minimum works per entity to qualify for ranking. Below this, share percentages
   // are too noisy to be meaningful (e.g. a field with 3 works at 100% cited).
   const MIN_WORKS_FOR_FIELD = 30;
   const MIN_WORKS_FOR_SUBFIELD = 15;
   const MIN_WORKS_FOR_INSTITUTION = 20;
+  const MIN_WORKS_FOR_PUBLISHER = 20;
   const TOP_N = 20;
 
   const [fields, setFields] = useState({ status: 'idle', rows: [], globalRate: 0 });
   const [subfields, setSubfields] = useState({ status: 'idle', rows: [], globalRate: 0 });
   const [institutions, setInstitutions] = useState({ status: 'idle', rows: [], globalRate: 0 });
+  const [publishers, setPublishers] = useState({ status: 'idle', rows: [], globalRate: 0 });
 
-  // Sort mode for the ranking. 'share' = ranked by share within entity (precision view);
-  // 'excess' = ranked by subset minus expected based on global rate (volume-aware view).
+  // Sort mode for the ranking. 'share' = ranked by within-entity percentage
+  // (precision view); 'excess' = ranked by subset minus expected based on global
+  // rate (volume-aware view).
   const [sortMode, setSortMode] = useState('share');
-  // Which dimension's scatter and ranking are shown. One at a time to keep the
-  // modal focused; users switch via the tab row.
-  const [dimensionTab, setDimensionTab] = useState('fields');
+  // Default to institutions tab since institutional patterns are the most
+  // policy-actionable lens for OAR readers.
+  const [dimensionTab, setDimensionTab] = useState('institutions');
 
   useEffect(() => {
-    if (!open || !mode) return;
+    if (!mode) return;
     let cancelled = false;
     const subsetClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
     const subsetFilter = `${baseFilterStr},${subsetClause}`;
@@ -1682,6 +1657,7 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
     setFields({ status: 'loading', rows: [], globalRate: 0 });
     setSubfields({ status: 'loading', rows: [], globalRate: 0 });
     setInstitutions({ status: 'loading', rows: [], globalRate: 0 });
+    setPublishers({ status: 'loading', rows: [], globalRate: 0 });
 
     // Fetch a group_by and return a map of key → { count, label }.
     const fetchGroupMap = async (filterStr, groupBy) => {
@@ -1734,11 +1710,12 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
 
     (async () => {
       try {
-        // Six parallel fetches: subset and total for each of three dimensions.
+        // Eight parallel fetches: subset and total for each of four dimensions.
         const [
           subsetFields, totalFields,
           subsetSubfields, totalSubfields,
           subsetInsts, totalInsts,
+          subsetPubs, totalPubs,
         ] = await Promise.all([
           fetchGroupMap(subsetFilter, 'primary_topic.field.id'),
           fetchGroupMap(totalFilter,  'primary_topic.field.id'),
@@ -1746,6 +1723,8 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
           fetchGroupMap(totalFilter,  'primary_topic.subfield.id'),
           fetchGroupMap(subsetFilter, 'authorships.institutions.id'),
           fetchGroupMap(totalFilter,  'authorships.institutions.id'),
+          fetchGroupMap(subsetFilter, 'primary_location.source.host_organization'),
+          fetchGroupMap(totalFilter,  'primary_location.source.host_organization'),
         ]);
         if (cancelled) return;
 
@@ -1763,30 +1742,18 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
         setFields({ status: 'ready', ...buildRankedList(subsetFields, totalFields, MIN_WORKS_FOR_FIELD) });
         setSubfields({ status: 'ready', ...buildRankedList(subsetSubfields, totalSubfields, MIN_WORKS_FOR_SUBFIELD) });
         setInstitutions({ status: 'ready', ...buildRankedList(filteredSubsetInsts, filteredTotalInsts, MIN_WORKS_FOR_INSTITUTION) });
+        setPublishers({ status: 'ready', ...buildRankedList(subsetPubs, totalPubs, MIN_WORKS_FOR_PUBLISHER) });
       } catch (e) {
         if (cancelled) return;
         setFields({ status: 'error', rows: [], globalRate: 0, error: e.message });
         setSubfields({ status: 'error', rows: [], globalRate: 0, error: e.message });
         setInstitutions({ status: 'error', rows: [], globalRate: 0, error: e.message });
+        setPublishers({ status: 'error', rows: [], globalRate: 0, error: e.message });
       }
     })();
 
     return () => { cancelled = true; };
-  }, [open, mode, baseFilterStr, countryInstitutionIds]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = prev;
-    };
-  }, [open, onClose]);
-
-  if (!open) return null;
+  }, [mode, baseFilterStr, countryInstitutionIds]);
 
   const titleMode = mode === 'cited' ? 'cited at least once' : 'still uncited';
   const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
@@ -1872,67 +1839,47 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(26, 22, 18, 0.55)', fontFamily: FONT_BODY }}
-      onClick={onClose}
-    >
-      <div
-        className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-md"
-        style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.ink}` }}
-        onClick={(e) => e.stopPropagation()}
+    <Card className="p-5 lg:col-span-12">
+      <SectionTitle
+        icon={mode === 'cited' ? Sparkles : BookOpen}
+        kicker={mode === 'cited' ? 'Citation insight · cited publications' : 'Citation insight · uncited publications'}
+        title={mode === 'cited'
+          ? 'Where the cited work lives'
+          : 'Where the uncited work lives'}
+        hint={`${countryName(country)} · top ${TOP_N} per dimension`}
+      />
+      <p
+        className="-mt-2 mb-4 max-w-3xl"
+        style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
       >
-        <header className="flex items-start justify-between gap-4 border-b px-5 py-4" style={{ borderColor: PALETTE.rule }}>
-          <div>
-            <div
-              style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.2em' }}
-              className="uppercase"
-            >
-              Citation reach · drill-down · {year}
-            </div>
-            <h3
-              style={{ fontFamily: FONT_DISPLAY, color: PALETTE.ink, fontSize: 22, fontWeight: 500, fontStyle: 'italic', lineHeight: 1.15 }}
-              className="mt-0.5"
-            >
-              Top fields, subfields, and institutions for works {titleMode}
-            </h3>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }} className="mt-1">
-              {countryName(country)} · pick a dimension below · scatter shows the distribution, list shows top {TOP_N}
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="flex h-8 w-8 items-center justify-center rounded-sm"
-            style={{ border: `1px solid ${PALETTE.rule}`, color: PALETTE.ink, background: 'transparent' }}
-            aria-label="Close"
-          >
-            <X size={14} />
-          </button>
-        </header>
+        {mode === 'cited'
+          ? `A profile of the institutions, fields, subfields, and publishers most strongly associated with works that have received at least one citation. Use the toggle below to switch between two views: ranking by within-entity percentage (treats every group as equal regardless of size) or ranking by extra count vs. expected (rewards groups that beat the country-wide rate at scale).`
+          : `A profile of where uncited works concentrate. Bigger uncited counts in some entities reflect citation lag for very recent works; persistent uncited shares in older works often signal a structural issue worth investigating.`}
+      </p>
 
-        {/* Sort toggle: switches the metric used to rank each panel. */}
-        <div
-          className="flex flex-wrap items-center gap-2 border-b px-5 py-2.5"
-          style={{ borderColor: PALETTE.rule, background: PALETTE.paper }}
+      {/* Sort toggle: switches the metric used to rank each panel. */}
+      <div
+        className="mb-3 flex flex-wrap items-center gap-2 rounded-sm px-3 py-2"
+        style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
+      >
+        <span
+          style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+          className="uppercase"
         >
-          <span
-            style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
-            className="uppercase"
+          Rank by
+        </span>
+        <button
+          onClick={() => setSortMode('share')}
+          className="rounded-sm px-2.5 py-1"
+          style={{
+            border: `1px solid ${sortMode === 'share' ? PALETTE.ink : PALETTE.rule}`,
+            background: sortMode === 'share' ? PALETTE.ink : 'transparent',
+            color: sortMode === 'share' ? PALETTE.cream : PALETTE.charcoal,
+            fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+          }}
+          title="Rank by what percentage of each entity's works are cited"
           >
-            Rank by
-          </span>
-          <button
-            onClick={() => setSortMode('share')}
-            className="rounded-sm px-2.5 py-1"
-            style={{
-              border: `1px solid ${sortMode === 'share' ? PALETTE.ink : PALETTE.rule}`,
-              background: sortMode === 'share' ? PALETTE.ink : 'transparent',
-              color: sortMode === 'share' ? PALETTE.cream : PALETTE.charcoal,
-              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
-            }}
-            title="Sort by share of works that fall in this subset, within each entity"
-          >
-            Share ({shareLabel})
+            By percentage
           </button>
           <button
             onClick={() => setSortMode('excess')}
@@ -1943,104 +1890,136 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
               color: sortMode === 'excess' ? PALETTE.cream : PALETTE.charcoal,
               fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
             }}
-            title="Sort by excess: observed minus expected based on global rate × entity size. Volume-aware."
+            title="Rank by how many extra works are cited compared to what the country-wide rate would predict"
           >
-            Excess ({mode === 'cited' ? 'works above expected' : 'works above expected uncited'})
+            By extra count
           </button>
           <span
             style={{
               fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted,
-              marginLeft: 'auto', maxWidth: 520, lineHeight: 1.4,
+              marginLeft: 'auto', maxWidth: 600, lineHeight: 1.5,
             }}
           >
-            {sortMode === 'share'
-              ? 'Share: subset / total within each entity (precision; ignores volume).'
-              : 'Excess: observed minus expected based on the global rate scaled to entity size (volume-aware).'}
+            {(() => {
+              // Build a worked example using the current data so the explanation
+              // is concrete rather than abstract. We use the country rate from the
+              // active tab and a plausible round number for "entity size" so the
+              // arithmetic reads naturally.
+              const tabSingular = dimensionTab === 'institutions' ? 'institution' : (dimensionTab === 'subfields' ? 'subfield' : 'field');
+              const tabPlural = dimensionTab === 'institutions' ? 'institutions' : (dimensionTab === 'subfields' ? 'subfields' : 'fields');
+              const verb = mode === 'cited' ? 'cited' : 'uncited';
+              const data = dimensionTab === 'fields' ? fields : (dimensionTab === 'subfields' ? subfields : institutions);
+              const ratePct = data.globalRate ? Math.round(data.globalRate * 100) : null;
+              if (sortMode === 'share') {
+                return (
+                  <>
+                    Ranks {tabPlural} by what percentage of their works are {verb}.
+                    A {tabSingular} with 50 works where 45 are {verb} (90%) outranks a {tabSingular} with 5,000 works where 4,000 are {verb} (80%).
+                    Size doesn't matter, only the rate.
+                  </>
+                );
+              }
+              // Excess mode: a one-sentence example using the actual country rate
+              if (ratePct != null) {
+                const example = 1000;
+                const expected = Math.round(example * (ratePct / 100));
+                return (
+                  <>
+                    The country-wide rate is {ratePct}% {verb}, so a {tabSingular} with {fmtFull(example)} works
+                    would be expected to have about {fmtFull(expected)} {verb}.
+                    If it actually has {fmtFull(expected + 150)}, its extra count is <strong style={{ color: PALETTE.forest }}>+150</strong>.
+                    If only {fmtFull(expected - 150)}, its extra count is <strong style={{ color: PALETTE.burgundy }}>-150</strong>.
+                  </>
+                );
+              }
+              return (
+                <>Ranks {tabPlural} by how many more (or fewer) {verb} works they have than the country-wide rate would predict given their size.</>
+              );
+            })()}
           </span>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4">
-          {/* Dimension tabs: one of Fields / Subfields / Institutions is active. */}
-          <div className="mb-3 flex flex-wrap items-center gap-1.5">
-            {[
-              { key: 'fields',       label: 'Fields',       data: fields,       min: MIN_WORKS_FOR_FIELD },
-              { key: 'subfields',    label: 'Subfields',    data: subfields,    min: MIN_WORKS_FOR_SUBFIELD },
-              { key: 'institutions', label: 'Institutions', data: institutions, min: MIN_WORKS_FOR_INSTITUTION },
-            ].map((tab) => {
-              const isActive = dimensionTab === tab.key;
-              const n = tab.data.rows?.length || 0;
-              return (
-                <button
-                  key={tab.key}
-                  onClick={() => setDimensionTab(tab.key)}
-                  className="rounded-sm px-2.5 py-1 transition-colors"
-                  style={{
-                    border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
-                    background: isActive ? PALETTE.ink : 'transparent',
-                    color: isActive ? PALETTE.cream : PALETTE.charcoal,
-                    fontFamily: FONT_MONO,
+        {/* Dimension tabs: order matches the rest of the dashboard (Institutions first). */}
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          {[
+            { key: 'institutions', label: 'Institutions', data: institutions, min: MIN_WORKS_FOR_INSTITUTION },
+            { key: 'fields',       label: 'Fields',       data: fields,       min: MIN_WORKS_FOR_FIELD },
+            { key: 'subfields',    label: 'Subfields',    data: subfields,    min: MIN_WORKS_FOR_SUBFIELD },
+            { key: 'publishers',   label: 'Publishers',   data: publishers,   min: MIN_WORKS_FOR_PUBLISHER },
+          ].map((tab) => {
+            const isActive = dimensionTab === tab.key;
+            const n = tab.data.rows?.length || 0;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setDimensionTab(tab.key)}
+                className="rounded-sm px-2.5 py-1 transition-colors"
+                style={{
+                  border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
+                  background: isActive ? PALETTE.ink : 'transparent',
+                  color: isActive ? PALETTE.cream : PALETTE.charcoal,
+                  fontFamily: FONT_MONO,
                     fontSize: 11,
                     letterSpacing: '0.04em',
-                  }}
-                >
-                  {tab.label}
-                  <span style={{ marginLeft: 6, opacity: 0.7 }}>
-                    ({n}+ qualifying · min {tab.min})
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Active tab body: scatter on the left, ranked list on the right.
-              On narrow screens they stack. */}
-          {(() => {
-            const tabConfig = {
-              fields:       { data: fields,       min: MIN_WORKS_FOR_FIELD,       singular: 'field' },
-              subfields:    { data: subfields,    min: MIN_WORKS_FOR_SUBFIELD,    singular: 'subfield' },
-              institutions: { data: institutions, min: MIN_WORKS_FOR_INSTITUTION, singular: 'institution' },
-            }[dimensionTab];
-            return (
-              <div className="grid grid-cols-1 gap-6 md:grid-cols-5">
-                <div className="md:col-span-3">
-                  <div
-                    style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
-                    className="uppercase mb-2"
-                  >
-                    Distribution · each dot is one {tabConfig.singular}
-                  </div>
-                  <CitationReachScatter
-                    rows={tabConfig.data.rows || []}
-                    globalRate={tabConfig.data.globalRate || 0}
-                    mode={mode}
-                    minWorks={tabConfig.min}
-                    status={tabConfig.data.status}
-                    sortMode={sortMode}
-                    topN={TOP_N}
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <div
-                    style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
-                    className="uppercase mb-2"
-                  >
-                    Top {TOP_N} by {sortMode === 'share' ? shareLabel : 'excess'}
-                  </div>
-                  {renderList(tabConfig.data, tabConfig.min)}
-                </div>
-              </div>
+                }}
+              >
+                {tab.label}
+                <span style={{ marginLeft: 6, opacity: 0.7 }}>
+                  ({n}+ qualifying · min {tab.min})
+                </span>
+              </button>
             );
-          })()}
+          })}
         </div>
-        <footer
-          className="border-t px-5 py-3"
-          style={{ borderColor: PALETTE.rule, fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }}
-        >
-          <span className="uppercase">
-            Esc to close · Highlighted dots are the top {TOP_N} in current ranking · Dashed line is the country-wide rate
-          </span>
-        </footer>
+
+        {/* Active tab body: scatter on the left, ranked list on the right.
+            On narrow screens they stack. */}
+        {(() => {
+          const tabConfig = {
+            institutions: { data: institutions, min: MIN_WORKS_FOR_INSTITUTION, singular: 'institution' },
+            fields:       { data: fields,       min: MIN_WORKS_FOR_FIELD,       singular: 'field' },
+            subfields:    { data: subfields,    min: MIN_WORKS_FOR_SUBFIELD,    singular: 'subfield' },
+            publishers:   { data: publishers,   min: MIN_WORKS_FOR_PUBLISHER,   singular: 'publisher' },
+          }[dimensionTab];
+          return (
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-5">
+              <div className="md:col-span-3">
+                <div
+                  style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                  className="uppercase mb-2"
+                >
+                  Distribution · each dot is one {tabConfig.singular}
+                </div>
+                <CitationReachScatter
+                  rows={tabConfig.data.rows || []}
+                  globalRate={tabConfig.data.globalRate || 0}
+                  mode={mode}
+                  minWorks={tabConfig.min}
+                  status={tabConfig.data.status}
+                  sortMode={sortMode}
+                  topN={TOP_N}
+                />
+              </div>
+              <div className="md:col-span-2">
+                <div
+                  style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                  className="uppercase mb-2"
+                >
+                  Top {TOP_N} by {sortMode === 'share' ? `percentage ${mode === 'cited' ? 'cited' : 'uncited'}` : 'extra count vs expected'}
+                </div>
+                {renderList(tabConfig.data, tabConfig.min)}
+              </div>
+            </div>
+          );
+        })()}
+      <div
+        className="mt-3 border-t pt-2"
+        style={{ borderColor: PALETTE.rule, fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }}
+      >
+        <span className="uppercase">
+          Highlighted dots are the top {TOP_N} in the current ranking · Dashed line marks the country-wide rate
+        </span>
       </div>
-    </div>
+    </Card>
   );
 };
 
@@ -2623,11 +2602,6 @@ export default function ResearchOutputDashboard() {
   // 'all' means no narrowing applied.
   const [instTypeFilter, setInstTypeFilter] = useState('all');
   const [instSubcategoryFilter, setInstSubcategoryFilter] = useState('all');
-
-  // 'cited' | 'uncited' | null. When set, opens a drill-down modal showing
-  // top fields and subfields for the corresponding subset of the active year's
-  // works. Respects every active filter (chip filters, type/subcategory pills).
-  const [citationDrill, setCitationDrill] = useState(null);
 
   const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
@@ -3764,9 +3738,25 @@ export default function ResearchOutputDashboard() {
               year={year}
               status={state.citedShare?.status}
               error={state.citedShare?.error}
-              onDrillDown={(mode) => setCitationDrill(mode)}
             />
           </Card>
+
+          {/* Two citation-insight sections (cited and uncited). Each renders its
+              own scatter + ranking with the four-dimension tab selector. */}
+          <CitationInsightSection
+            mode="cited"
+            year={year}
+            country={country}
+            baseFilterStr={filterStrings.all}
+            countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
+          />
+          <CitationInsightSection
+            mode="uncited"
+            year={year}
+            country={country}
+            baseFilterStr={filterStrings.all}
+            countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
+          />
 
           <Card className="p-5 lg:col-span-12">
             <SectionTitle
@@ -3946,15 +3936,6 @@ export default function ResearchOutputDashboard() {
               });
             }
           : undefined}
-      />
-      <CitationDrillModal
-        open={!!citationDrill}
-        mode={citationDrill}
-        onClose={() => setCitationDrill(null)}
-        year={year}
-        country={country}
-        baseFilterStr={filterStrings.all}
-        countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
       />
     </div>
   );
