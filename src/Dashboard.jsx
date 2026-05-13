@@ -1493,7 +1493,7 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
   const yTicks = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
 
   return (
-    <div className="relative" style={{ width: '100%', maxWidth: W }}>
+    <div className="relative" style={{ width: '100%' }}>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
         {/* Y gridlines + labels */}
         {yTicks.map((y) => (
@@ -1669,6 +1669,15 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   // { status, data: Map<entityKey, number> }. Cleared whenever mode or
   // baseFilterStr changes (because the underlying subset of works changes).
   const [meanCitesByDim, setMeanCitesByDim] = useState({});
+
+  // Mean-cites only makes sense for the cited subset (uncited works all have
+  // zero citations by definition). Auto-revert if the user flips to uncited
+  // while that sort was active.
+  useEffect(() => {
+    if (mode === 'uncited' && sortMode === 'meanCites') {
+      setSortMode('share');
+    }
+  }, [mode, sortMode]);
 
   useEffect(() => {
     if (!mode) return;
@@ -2093,19 +2102,21 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
           >
             By extra count
           </button>
-          <button
-            onClick={() => setSortMode('meanCites')}
-            className="rounded-sm px-2.5 py-1"
-            style={{
-              border: `1px solid ${sortMode === 'meanCites' ? PALETTE.ink : PALETTE.rule}`,
-              background: sortMode === 'meanCites' ? PALETTE.ink : 'transparent',
-              color: sortMode === 'meanCites' ? PALETTE.cream : PALETTE.charcoal,
-              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
-            }}
-            title="Rank by average citations per work within each entity. Loads on demand (one extra call per top entity)."
-          >
-            By mean cites/work
-          </button>
+          {mode === 'cited' && (
+            <button
+              onClick={() => setSortMode('meanCites')}
+              className="rounded-sm px-2.5 py-1"
+              style={{
+                border: `1px solid ${sortMode === 'meanCites' ? PALETTE.ink : PALETTE.rule}`,
+                background: sortMode === 'meanCites' ? PALETTE.ink : 'transparent',
+                color: sortMode === 'meanCites' ? PALETTE.cream : PALETTE.charcoal,
+                fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+              }}
+              title="Rank by average citations per work within each entity. Loads on demand (one extra call per top entity)."
+            >
+              By mean cites/work
+            </button>
+          )}
           <span
             style={{
               fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted,
@@ -2167,14 +2178,17 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
             })()}
           </span>
         </div>
-        {/* Dimension tabs: order matches the rest of the dashboard (Institutions first). */}
-        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        {/* Dimension tabs: order matches the rest of the dashboard (Institutions first).
+            "n = X" is the number of entities that pass the per-dimension minimum-works
+            threshold; only these are eligible for ranking. Thresholds vary by dimension
+            and are documented in the constants at the top of this component. */}
+        <div className="mb-1 flex flex-wrap items-center gap-1">
           {[
-            { key: 'institutions', label: 'Institutions',     data: institutions, min: MIN_WORKS_FOR_INSTITUTION },
-            { key: 'fields',       label: 'Fields',           data: fields,       min: MIN_WORKS_FOR_FIELD },
-            { key: 'subfields',    label: 'Subfields',        data: subfields,    min: MIN_WORKS_FOR_SUBFIELD },
-            { key: 'publishers',   label: 'Publishers',       data: publishers,   min: MIN_WORKS_FOR_PUBLISHER },
-            { key: 'countries',    label: 'Collaborator countries', data: countries, min: MIN_WORKS_FOR_COUNTRY },
+            { key: 'institutions', label: 'Institutions',  data: institutions, min: MIN_WORKS_FOR_INSTITUTION },
+            { key: 'fields',       label: 'Fields',        data: fields,       min: MIN_WORKS_FOR_FIELD },
+            { key: 'subfields',    label: 'Subfields',     data: subfields,    min: MIN_WORKS_FOR_SUBFIELD },
+            { key: 'publishers',   label: 'Publishers',    data: publishers,   min: MIN_WORKS_FOR_PUBLISHER },
+            { key: 'countries',    label: 'Co-author countries', data: countries, min: MIN_WORKS_FOR_COUNTRY },
           ].map((tab) => {
             const isActive = dimensionTab === tab.key;
             const n = tab.data.rows?.length || 0;
@@ -2182,23 +2196,29 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
               <button
                 key={tab.key}
                 onClick={() => setDimensionTab(tab.key)}
-                className="rounded-sm px-2.5 py-1 transition-colors"
+                className="rounded-sm px-2 py-0.5 transition-colors"
                 style={{
                   border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
                   background: isActive ? PALETTE.ink : 'transparent',
                   color: isActive ? PALETTE.cream : PALETTE.charcoal,
                   fontFamily: FONT_MONO,
-                    fontSize: 11,
-                    letterSpacing: '0.04em',
+                  fontSize: 10.5,
+                  letterSpacing: '0.03em',
+                  whiteSpace: 'nowrap',
                 }}
+                title={`${tab.label} · ${n} eligible (each has at least ${tab.min} works)`}
               >
                 {tab.label}
-                <span style={{ marginLeft: 6, opacity: 0.7 }}>
-                  ({n}+ qualifying · min {tab.min})
-                </span>
+                <span style={{ marginLeft: 5, opacity: 0.7 }}>(n={n})</span>
               </button>
             );
           })}
+        </div>
+        <div
+          className="mb-3"
+          style={{ fontFamily: FONT_MONO, fontSize: 9.5, letterSpacing: '0.04em', color: PALETTE.muted }}
+        >
+          n = entities with enough works to qualify for ranking (thresholds vary by dimension; hover a pill for details)
         </div>
 
         {/* Active tab body: scatter on the left, ranked list on the right.
