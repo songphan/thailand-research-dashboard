@@ -216,8 +216,14 @@ const normalizeFilterValue = (key, dim = null) => {
 
 // excludeDim drops that dimension's chips so a chart can still display its full breakdown
 // when it is the source of the filter (faceted-search "exclusive" pattern).
-const buildFilterString = (country, year, filters, excludeDim = null) => {
-  const parts = [`authorships.institutions.country_code:${country}`, `publication_year:${year}`];
+const buildFilterString = (country, yearOrYears, filters, excludeDim = null) => {
+  // OpenAlex filter values support OR via the pipe character. So a multi-year
+  // selection encodes as `publication_year:2023|2024|2025` and reads naturally
+  // on the server side as a single-clause OR over the listed years.
+  const yearClause = Array.isArray(yearOrYears)
+    ? `publication_year:${[...yearOrYears].sort((a, b) => a - b).join('|')}`
+    : `publication_year:${yearOrYears}`;
+  const parts = [`authorships.institutions.country_code:${country}`, yearClause];
   for (const [dim, items] of Object.entries(filters || {})) {
     if (!items || items.length === 0) continue;
     if (dim === excludeDim) continue;
@@ -1451,9 +1457,13 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
   const MIN_WORKS_FOR_INSTITUTION = 20;
   const TOP_N = 20;
 
-  const [fields, setFields] = useState({ status: 'idle', data: [] });
-  const [subfields, setSubfields] = useState({ status: 'idle', data: [] });
-  const [institutions, setInstitutions] = useState({ status: 'idle', data: [] });
+  const [fields, setFields] = useState({ status: 'idle', rows: [], globalRate: 0 });
+  const [subfields, setSubfields] = useState({ status: 'idle', rows: [], globalRate: 0 });
+  const [institutions, setInstitutions] = useState({ status: 'idle', rows: [], globalRate: 0 });
+
+  // Sort mode for the ranking. 'share' = ranked by share within entity (precision view);
+  // 'excess' = ranked by subset minus expected based on global rate (volume-aware view).
+  const [sortMode, setSortMode] = useState('share');
 
   useEffect(() => {
     if (!open || !mode) return;
@@ -1461,9 +1471,9 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
     const subsetClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
     const subsetFilter = `${baseFilterStr},${subsetClause}`;
     const totalFilter = baseFilterStr;
-    setFields({ status: 'loading', data: [] });
-    setSubfields({ status: 'loading', data: [] });
-    setInstitutions({ status: 'loading', data: [] });
+    setFields({ status: 'loading', rows: [], globalRate: 0 });
+    setSubfields({ status: 'loading', rows: [], globalRate: 0 });
+    setInstitutions({ status: 'loading', rows: [], globalRate: 0 });
 
     // Fetch a group_by and return a map of key → { count, label }.
     const fetchGroupMap = async (filterStr, groupBy) => {
@@ -1479,24 +1489,39 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
       return map;
     };
 
-    // Build a sorted-by-share array from numerator and denominator maps.
-    // minWorks: only include entities whose denominator is at least this.
-    const buildShareList = (subsetMap, totalMap, minWorks) => {
+    // Build a ranked array from numerator and denominator maps. Each row carries
+    // both metrics: `share` (subset / total within entity, the precision-like view)
+    // and `excess` (subset minus expected, the volume-aware view). Expected =
+    // total × global_rate, so excess is positive when an entity outperforms the
+    // global cited (or uncited) rate scaled to its size, and negative otherwise.
+    // minWorks gates noisy small samples out of the ranking.
+    const buildRankedList = (subsetMap, totalMap, minWorks) => {
+      // Global rate across all entries in this dimension: total subset count /
+      // total denominator count. Used to compute expected for excess.
+      let subsetSum = 0;
+      let totalSum = 0;
+      for (const [, totalEntry] of totalMap.entries()) totalSum += totalEntry.count;
+      for (const [, subsetEntry] of subsetMap.entries()) subsetSum += subsetEntry.count;
+      const globalRate = totalSum > 0 ? subsetSum / totalSum : 0;
+
       const rows = [];
       for (const [key, totalEntry] of totalMap.entries()) {
         if (totalEntry.count < minWorks) continue;
         const subsetCount = subsetMap.get(key)?.count || 0;
         const share = subsetCount / totalEntry.count;
+        const expected = totalEntry.count * globalRate;
+        const excess = subsetCount - expected;
         rows.push({
           key,
           label: totalEntry.label || subsetMap.get(key)?.label,
           subset: subsetCount,
           total: totalEntry.count,
           share,
+          expected,
+          excess,
         });
       }
-      rows.sort((a, b) => b.share - a.share || b.total - a.total);
-      return rows.slice(0, TOP_N);
+      return { rows, globalRate };
     };
 
     (async () => {
@@ -1527,14 +1552,14 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
           filteredTotalInsts  = new Map([...totalInsts].filter(([k]) => allowed.has(k)));
         }
 
-        setFields({ status: 'ready', data: buildShareList(subsetFields, totalFields, MIN_WORKS_FOR_FIELD) });
-        setSubfields({ status: 'ready', data: buildShareList(subsetSubfields, totalSubfields, MIN_WORKS_FOR_SUBFIELD) });
-        setInstitutions({ status: 'ready', data: buildShareList(filteredSubsetInsts, filteredTotalInsts, MIN_WORKS_FOR_INSTITUTION) });
+        setFields({ status: 'ready', ...buildRankedList(subsetFields, totalFields, MIN_WORKS_FOR_FIELD) });
+        setSubfields({ status: 'ready', ...buildRankedList(subsetSubfields, totalSubfields, MIN_WORKS_FOR_SUBFIELD) });
+        setInstitutions({ status: 'ready', ...buildRankedList(filteredSubsetInsts, filteredTotalInsts, MIN_WORKS_FOR_INSTITUTION) });
       } catch (e) {
         if (cancelled) return;
-        setFields({ status: 'error', data: [], error: e.message });
-        setSubfields({ status: 'error', data: [], error: e.message });
-        setInstitutions({ status: 'error', data: [], error: e.message });
+        setFields({ status: 'error', rows: [], globalRate: 0, error: e.message });
+        setSubfields({ status: 'error', rows: [], globalRate: 0, error: e.message });
+        setInstitutions({ status: 'error', rows: [], globalRate: 0, error: e.message });
       }
     })();
 
@@ -1559,7 +1584,7 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
   const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
   const shareLabel = mode === 'cited' ? '% cited' : '% uncited';
 
-  const renderList = ({ status, data }, minWorks) => {
+  const renderList = ({ status, rows }, minWorks) => {
     if (status === 'loading') {
       return (
         <div className="flex items-center gap-2 px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
@@ -1570,28 +1595,44 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
     if (status === 'error') {
       return <div className="px-3 py-6" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>Could not load.</div>;
     }
-    if (!data || data.length === 0) {
+    if (!rows || rows.length === 0) {
       return (
         <div className="px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
           No entries with at least {minWorks} works in this subset.
         </div>
       );
     }
+    // Sort the precomputed rows by the active mode, then take top-N.
+    const sorted = [...rows].sort((a, b) => {
+      if (sortMode === 'excess') return b.excess - a.excess;
+      // Default: share desc, then total desc as tiebreaker
+      return b.share - a.share || b.total - a.total;
+    }).slice(0, TOP_N);
+    // Bar width baseline depends on mode. For share, full bar = 100%. For excess,
+    // we scale to the max absolute excess in the visible slice so positive and
+    // negative deltas remain visually proportional.
+    const maxAbsExcess = sortMode === 'excess'
+      ? Math.max(1, ...sorted.map((d) => Math.abs(d.excess)))
+      : 1;
     return (
       <ol className="space-y-1.5">
-        {data.map((d, i) => {
-          // Bar width represents the share, full bar = 100%.
-          const widthPct = d.share * 100;
-          const sharePct = widthPct.toFixed(1) + '%';
+        {sorted.map((d, i) => {
+          const sharePct = (d.share * 100).toFixed(1) + '%';
+          const excessStr = (d.excess >= 0 ? '+' : '') + Math.round(d.excess).toLocaleString();
+          // Primary metric for bar width is whichever sort mode is active.
+          const widthPct = sortMode === 'share'
+            ? d.share * 100
+            : (Math.abs(d.excess) / maxAbsExcess) * 100;
+          const excessNegative = sortMode === 'excess' && d.excess < 0;
           return (
-            <li key={d.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '24px 1fr 88px' }}>
+            <li key={d.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '24px 1fr 96px' }}>
               <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, textAlign: 'right' }}>{i + 1}</span>
               <div className="relative" style={{ height: 22, background: PALETTE.cream, borderRadius: 2 }}>
                 <div
                   style={{
                     position: 'absolute', left: 0, top: 0, bottom: 0,
                     width: `${widthPct}%`,
-                    background: accent,
+                    background: excessNegative ? PALETTE.burgundy : accent,
                     opacity: 0.22,
                     borderRadius: 2,
                   }}
@@ -1605,11 +1646,14 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
                 </span>
               </div>
               <div style={{ textAlign: 'right' }}>
+                {/* Primary metric (large), secondary metric (small) */}
                 <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
-                  {sharePct}
+                  {sortMode === 'excess' ? excessStr : sharePct}
                 </div>
                 <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>
-                  {fmtFull(d.subset)} / {fmtFull(d.total)}
+                  {sortMode === 'excess'
+                    ? `${sharePct} · ${fmtFull(d.total)}`
+                    : `${excessStr} · ${fmtFull(d.subset)} / ${fmtFull(d.total)}`}
                 </div>
               </div>
             </li>
@@ -1642,10 +1686,10 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
               style={{ fontFamily: FONT_DISPLAY, color: PALETTE.ink, fontSize: 22, fontWeight: 500, fontStyle: 'italic', lineHeight: 1.15 }}
               className="mt-0.5"
             >
-              Top fields, subfields, and institutions by share of works {titleMode}
+              Top fields, subfields, and institutions for works {titleMode}
             </h3>
             <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }} className="mt-1">
-              {countryName(country)} · ranked by within-entity {shareLabel} · top {TOP_N} each · min thresholds prevent small-sample noise
+              {countryName(country)} · top {TOP_N} each · min thresholds prevent small-sample noise
             </div>
           </div>
           <button
@@ -1657,6 +1701,55 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
             <X size={14} />
           </button>
         </header>
+
+        {/* Sort toggle: switches the metric used to rank each panel. */}
+        <div
+          className="flex flex-wrap items-center gap-2 border-b px-5 py-2.5"
+          style={{ borderColor: PALETTE.rule, background: PALETTE.paper }}
+        >
+          <span
+            style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+            className="uppercase"
+          >
+            Rank by
+          </span>
+          <button
+            onClick={() => setSortMode('share')}
+            className="rounded-sm px-2.5 py-1"
+            style={{
+              border: `1px solid ${sortMode === 'share' ? PALETTE.ink : PALETTE.rule}`,
+              background: sortMode === 'share' ? PALETTE.ink : 'transparent',
+              color: sortMode === 'share' ? PALETTE.cream : PALETTE.charcoal,
+              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+            }}
+            title="Sort by share of works that fall in this subset, within each entity"
+          >
+            Share ({shareLabel})
+          </button>
+          <button
+            onClick={() => setSortMode('excess')}
+            className="rounded-sm px-2.5 py-1"
+            style={{
+              border: `1px solid ${sortMode === 'excess' ? PALETTE.ink : PALETTE.rule}`,
+              background: sortMode === 'excess' ? PALETTE.ink : 'transparent',
+              color: sortMode === 'excess' ? PALETTE.cream : PALETTE.charcoal,
+              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+            }}
+            title="Sort by excess: observed minus expected based on global rate × entity size. Volume-aware."
+          >
+            Excess ({mode === 'cited' ? 'works above expected' : 'works above expected uncited'})
+          </button>
+          <span
+            style={{
+              fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted,
+              marginLeft: 'auto', maxWidth: 520, lineHeight: 1.4,
+            }}
+          >
+            {sortMode === 'share'
+              ? 'Share: subset / total within each entity (precision; ignores volume).'
+              : 'Excess: observed minus expected based on the global rate scaled to entity size (volume-aware).'}
+          </span>
+        </div>
         <div className="flex-1 overflow-y-auto px-5 py-4">
           <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
             <div>
@@ -2243,7 +2336,16 @@ export default function ResearchOutputDashboard() {
     return /^[A-Z]{2}$/.test(saved || '') ? saved : 'TH';
   });
 
-  const [year, setYear] = useState(2025);
+  // Multi-year selection. `years` is the source of truth: a sorted array of
+  // years currently active (always at least one). `year` is the representative
+  // year (the most recent in the selection) used for labels, comparison anchors,
+  // and the Producing Institutions per-year lookup. By keeping `year` as a derived
+  // number we avoid touching every downstream reference; only the filter-string
+  // builder and the few panels that need a multi-year-aware view check `years`.
+  const [years, setYears] = useState([2025]);
+  const year = years.length > 0 ? Math.max(...years) : 2025;
+  const setYear = (y) => setYears([y]); // back-compat for any code that calls setYear
+
   const [refreshKey, setRefreshKey] = useState(0);
   const [filters, setFilters] = useState({});
   const [state, setState] = useState({});
@@ -2387,10 +2489,10 @@ export default function ResearchOutputDashboard() {
 
   const filterStrings = useMemo(() => {
     // Base filters, always built from the breadcrumb chips.
-    const baseAll = buildFilterString(country, year, filters);
+    const baseAll = buildFilterString(country, years, filters);
     const baseByDim = {};
     Object.keys(DIMENSIONS).forEach((d) => {
-      baseByDim[d] = buildFilterString(country, year, filters, d);
+      baseByDim[d] = buildFilterString(country, years, filters, d);
     });
 
     // Augment with the synthetic institution-ID filter when a type/subcategory is active.
@@ -2408,7 +2510,7 @@ export default function ResearchOutputDashboard() {
       m[d] = augmented(baseByDim[d], d !== 'institutions');
     });
     return m;
-  }, [country, year, filters, syntheticInstitutionFilter]);
+  }, [country, years, filters, syntheticInstitutionFilter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2476,24 +2578,25 @@ export default function ResearchOutputDashboard() {
       return { totalCites, totalWorks, citedWorks };
     });
 
-    // Cited vs uncited share for the active year. Cheap: two count requests.
+    // Cited vs uncited share for the active selection. Cheap: two count requests.
     run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
     run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
 
-    // Same split but for prior years (up to 5), for the visibility overview card.
-    // We swap publication_year in the filter string while keeping every other clause
-    // (country, chip filters, synthetic institution filter) intact. State keys are
-    // prevYearCited_1 through prevYearCited_5 (and uncited_1..5), where the number is
-    // the offset from the active year.
-    for (let offset = 1; offset <= 5; offset++) {
-      const targetYear = year - offset;
-      if (targetYear < 2000) break;
-      const prevYearAll = filterStrings.all.replace(
-        new RegExp(`publication_year:${year}\\b`),
-        `publication_year:${targetYear}`
-      );
-      run(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
-      run(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0);
+    // Prior-year comparisons for the visibility overview card. Only fired in
+    // single-year mode, where there's a well-defined "the active year" to swap
+    // out of the filter string. In multi-year mode the comparison view is
+    // hidden and these fetches are skipped.
+    if (years.length === 1) {
+      for (let offset = 1; offset <= 5; offset++) {
+        const targetYear = year - offset;
+        if (targetYear < 2000) break;
+        const prevYearAll = filterStrings.all.replace(
+          new RegExp(`publication_year:${year}\\b`),
+          `publication_year:${targetYear}`
+        );
+        run(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
+        run(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0);
+      }
     }
 
     run('topWorks', topWorksUrl(filterStrings.all), (j) =>
@@ -2622,8 +2725,11 @@ export default function ResearchOutputDashboard() {
         if (cancelled) return;
         const data = allInsts
           .map((inst) => {
-            const yearEntry = (inst.counts_by_year || []).find((c) => c.year === year);
-            const value = yearEntry?.works_count || 0;
+            // Sum works_count across all selected years from the counts_by_year array.
+            const yearSet = new Set(years);
+            const value = (inst.counts_by_year || [])
+              .filter((c) => yearSet.has(c.year))
+              .reduce((s, c) => s + (c.works_count || 0), 0);
             const type = inst.type || 'other';
             return {
               key: inst.id,
@@ -2645,7 +2751,7 @@ export default function ResearchOutputDashboard() {
     })();
 
     return () => { cancelled = true; };
-  }, [country, year, refreshKey]);
+  }, [country, years, refreshKey]);
 
   const selKeys = (dim) => (filters[dim] || []).map((f) => f.value);
 
@@ -2764,23 +2870,76 @@ export default function ResearchOutputDashboard() {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <CountrySelector country={country} onChange={setCountry} />
-              <div className="flex items-center gap-1 rounded-sm" style={{ border: `1px solid ${PALETTE.ink}` }}>
-                {YEARS.map((y) => (
-                  <button
-                    key={y}
-                    onClick={() => setYear(y)}
-                    style={{
-                      fontFamily: FONT_MONO,
-                      fontSize: 12,
-                      letterSpacing: '0.04em',
-                      background: y === year ? PALETTE.ink : 'transparent',
-                      color: y === year ? PALETTE.cream : PALETTE.ink,
-                    }}
-                    className="px-3 py-1.5 transition-colors"
-                  >
-                    {y}
-                  </button>
-                ))}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Multi-select year tabs. Click to toggle each year; cannot
+                    deselect the last remaining year (the dashboard always needs
+                    at least one). The All/Reset pills below give quick presets. */}
+                <div className="flex items-center gap-1 rounded-sm" style={{ border: `1px solid ${PALETTE.ink}` }}>
+                  {YEARS.map((y) => {
+                    const selected = years.includes(y);
+                    return (
+                      <button
+                        key={y}
+                        onClick={() => {
+                          if (selected) {
+                            // Don't allow deselecting the last year
+                            if (years.length > 1) {
+                              setYears(years.filter((v) => v !== y));
+                            }
+                          } else {
+                            setYears([...years, y].sort((a, b) => a - b));
+                          }
+                        }}
+                        style={{
+                          fontFamily: FONT_MONO,
+                          fontSize: 12,
+                          letterSpacing: '0.04em',
+                          background: selected ? PALETTE.ink : 'transparent',
+                          color: selected ? PALETTE.cream : PALETTE.ink,
+                        }}
+                        className="px-3 py-1.5 transition-colors"
+                        title={selected ? (years.length > 1 ? `Remove ${y} from selection` : 'Cannot deselect the only active year') : `Add ${y} to selection`}
+                      >
+                        {y}
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* Year preset shortcuts */}
+                <button
+                  onClick={() => setYears([...YEARS].sort((a, b) => a - b))}
+                  disabled={years.length === YEARS.length}
+                  style={{
+                    fontFamily: FONT_MONO,
+                    fontSize: 10,
+                    letterSpacing: '0.1em',
+                    border: `1px solid ${PALETTE.rule}`,
+                    background: 'transparent',
+                    color: years.length === YEARS.length ? PALETTE.rule : PALETTE.muted,
+                    cursor: years.length === YEARS.length ? 'default' : 'pointer',
+                  }}
+                  className="rounded-sm px-2 py-1 uppercase"
+                  title="Select all available years"
+                >
+                  All
+                </button>
+                <button
+                  onClick={() => setYears([YEARS[0]])}
+                  disabled={years.length === 1 && years[0] === YEARS[0]}
+                  style={{
+                    fontFamily: FONT_MONO,
+                    fontSize: 10,
+                    letterSpacing: '0.1em',
+                    border: `1px solid ${PALETTE.rule}`,
+                    background: 'transparent',
+                    color: (years.length === 1 && years[0] === YEARS[0]) ? PALETTE.rule : PALETTE.muted,
+                    cursor: (years.length === 1 && years[0] === YEARS[0]) ? 'default' : 'pointer',
+                  }}
+                  className="rounded-sm px-2 py-1 uppercase"
+                  title="Reset to current year only"
+                >
+                  Reset
+                </button>
               </div>
               <button
                 onClick={() => setRefreshKey((k) => k + 1)}
@@ -3296,14 +3455,16 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          {/* Cited vs uncited overview, with prior-year comparison. Sits before
-              the Most-cited rankings as a high-level summary of the cited share. */}
+          {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
+              years for comparison; in multi-year mode shows just the aggregate. */}
           <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={Sparkles}
               kicker="Citation reach"
               title="Cited vs uncited share"
-              hint={year > 2000 ? `Compared to ${year - 1}` : null}
+              hint={years.length === 1
+                ? (year > 2000 ? `Compared to ${year - 1}` : null)
+                : `Aggregate of ${years.length} selected year${years.length === 1 ? '' : 's'}`}
               count={(() => {
                 const cited = state.citedShare?.data;
                 const total = (state.citedShare?.data || 0) + (state.uncitedShare?.data || 0);
@@ -3315,25 +3476,41 @@ export default function ResearchOutputDashboard() {
               className="-mt-2 mb-4 max-w-3xl"
               style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
             >
-              Share of {countryName(country)}-affiliated works that have received at least one citation versus
-              those still uncited, within the current filter selection. Citations accumulate over time, so a small
-              uncited share in the latest year is normal and decays as the corpus ages.
+              {years.length === 1
+                ? `Share of ${countryName(country)}-affiliated works that have received at least one citation versus those still uncited, within the current filter selection. Citations accumulate over time, so a small uncited share in the latest year is normal and decays as the corpus ages.`
+                : `Share of ${countryName(country)}-affiliated works across the selected year range that have received at least one citation versus those still uncited. Year-over-year comparison is hidden in multi-year mode; switch to a single year to see the prior-years comparison bars.`}
             </p>
             <CitationReachBars
-              series={[
-                {
-                  year,
-                  cited: state.citedShare?.data || 0,
-                  uncited: state.uncitedShare?.data || 0,
-                  emphasis: true,
-                },
-                ...[1, 2, 3, 4, 5].map((offset) => ({
-                  year: year - offset,
-                  cited: state[`prevYearCited_${offset}`]?.data || 0,
-                  uncited: state[`prevYearUncited_${offset}`]?.data || 0,
-                  emphasis: false,
-                })),
-              ]}
+              series={
+                years.length === 1
+                  ? [
+                      // Single-year mode: active year + up to five priors for comparison
+                      {
+                        year,
+                        cited: state.citedShare?.data || 0,
+                        uncited: state.uncitedShare?.data || 0,
+                        emphasis: true,
+                      },
+                      ...[1, 2, 3, 4, 5].map((offset) => ({
+                        year: year - offset,
+                        cited: state[`prevYearCited_${offset}`]?.data || 0,
+                        uncited: state[`prevYearUncited_${offset}`]?.data || 0,
+                        emphasis: false,
+                      })),
+                    ]
+                  : [
+                      // Multi-year mode: single aggregate row, no comparison
+                      {
+                        year: years.length === 2
+                          ? `${Math.min(...years)} & ${Math.max(...years)}`
+                          : `${Math.min(...years)}–${Math.max(...years)}` +
+                            (years.length === Math.max(...years) - Math.min(...years) + 1 ? '' : ` (${years.length} years)`),
+                        cited: state.citedShare?.data || 0,
+                        uncited: state.uncitedShare?.data || 0,
+                        emphasis: true,
+                      },
+                    ]
+              }
               year={year}
               status={state.citedShare?.status}
               error={state.citedShare?.error}
