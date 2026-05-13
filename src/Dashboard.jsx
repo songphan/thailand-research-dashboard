@@ -235,7 +235,51 @@ const buildFilterString = (country, yearOrYears, filters, excludeDim = null) => 
   return parts.join(',');
 };
 
+// Concurrency-limited request gate. OpenAlex's rate limit is 10 requests per
+// second; the dashboard can easily fire 30-40 in the first second on a fresh
+// load (panels, citation insight, prior-year comparisons, mean-cites lazy
+// fetches). Without a gate they all hit at once, hit the rate limit, get 429,
+// retry simultaneously, and hit it again. The gate caps concurrent in-flight
+// requests at MAX_CONCURRENT, queueing the rest. Combined with the existing
+// 429 retry logic, this turns bursts into smooth-feeding sequences.
+//
+// MAX_CONCURRENT=6 leaves headroom under the 10/sec ceiling for retries and
+// network jitter. Increasing this risks 429s; decreasing it slows page loads
+// unnecessarily.
+const MAX_CONCURRENT_REQUESTS = 6;
+let inflightCount = 0;
+const pendingQueue = [];
+function acquireRequestSlot() {
+  return new Promise((resolve) => {
+    if (inflightCount < MAX_CONCURRENT_REQUESTS) {
+      inflightCount++;
+      resolve();
+    } else {
+      pendingQueue.push(resolve);
+    }
+  });
+}
+function releaseRequestSlot() {
+  const next = pendingQueue.shift();
+  if (next) {
+    // Hand the slot directly to the next queued request without decrementing
+    // and re-incrementing the counter; this keeps the invariant tight under
+    // contention.
+    next();
+  } else {
+    inflightCount--;
+  }
+}
+
 async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
+  await acquireRequestSlot();
+  let slotReleased = false;
+  const release = () => {
+    if (!slotReleased) {
+      slotReleased = true;
+      releaseRequestSlot();
+    }
+  };
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -247,16 +291,20 @@ async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
         throw new Error('HTTP 409 — OpenAlex API key required or daily credits exhausted. See OPENALEX_API_KEY at the top of Dashboard.jsx.');
       }
       // Retry on transient failures: 429 (rate limit), 502/503/504 (gateway/timeout).
-      // Use exponential backoff with jitter; this matters most when OPENALEX_API_KEY
-      // is not set or when many parallel calls fire (the dashboard fires ~14 on load).
+      // Use exponential backoff with jitter. With the request gate in place, 429s
+      // should be rare; this is a second line of defence.
       const isTransient = res.status === 429 || res.status >= 502;
       const maxAttempts = res.status === 429 ? 4 : 2;
       if (isTransient && attempt < maxAttempts) {
         clearTimeout(t);
+        // Release the slot before sleeping so queued requests can proceed.
+        // The retry will re-acquire when it's ready to fire again.
+        release();
         // 800ms, 1.6s, 3.2s, 6.4s base + 0-600ms jitter
         const base = 800 * Math.pow(2, attempt);
         const wait = base + Math.random() * 600;
         await new Promise((r) => setTimeout(r, wait));
+        // Re-enter fetchJson which will acquire a fresh slot.
         return fetchJson(url, timeoutMs, attempt + 1);
       }
       throw new Error(`HTTP ${res.status} ${res.statusText || ''}`.trim());
@@ -264,6 +312,8 @@ async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
     return await res.json();
   } finally {
     clearTimeout(t);
+    // release() is a no-op if the retry path already released.
+    release();
   }
 }
 
