@@ -1619,26 +1619,31 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
   );
 };
 
-// Citation insight section showing top institutions, fields, subfields, and
-// publishers for the cited or uncited subset of the active selection, ranked
-// by within-entity share or by extra count vs expected. For each entity we
-// fetch the subset count (numerator) and the full count (denominator), compute
-// the share, and apply a minimum-works threshold so tiny entities with 2-of-3
-// works cited don't dominate the rankings. Renders inline as a dashboard card
-// rather than as a modal overlay.
-const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryInstitutionIds = [] }) => {
+// Citation insight section showing top institutions, fields, subfields,
+// publishers, and international-collaborator countries for the cited or
+// uncited subset of the active selection. The reader picks the mode
+// (cited or uncited) and the ranking metric (within-entity percentage,
+// or extra count vs expected) via toggles inside the section. The section
+// owns its own data fetch and only loads the active mode, so switching modes
+// triggers a reload rather than carrying both at once.
+const CitationInsightSection = ({ year, country, baseFilterStr, countryInstitutionIds = [] }) => {
   // Minimum works per entity to qualify for ranking. Below this, share percentages
   // are too noisy to be meaningful (e.g. a field with 3 works at 100% cited).
   const MIN_WORKS_FOR_FIELD = 30;
   const MIN_WORKS_FOR_SUBFIELD = 15;
   const MIN_WORKS_FOR_INSTITUTION = 20;
   const MIN_WORKS_FOR_PUBLISHER = 20;
+  const MIN_WORKS_FOR_COUNTRY = 20;
   const TOP_N = 20;
+
+  // 'cited' or 'uncited'. Selectable via toggle at the top of the section.
+  const [mode, setMode] = useState('cited');
 
   const [fields, setFields] = useState({ status: 'idle', rows: [], globalRate: 0 });
   const [subfields, setSubfields] = useState({ status: 'idle', rows: [], globalRate: 0 });
   const [institutions, setInstitutions] = useState({ status: 'idle', rows: [], globalRate: 0 });
   const [publishers, setPublishers] = useState({ status: 'idle', rows: [], globalRate: 0 });
+  const [countries, setCountries] = useState({ status: 'idle', rows: [], globalRate: 0 });
 
   // Sort mode for the ranking. 'share' = ranked by within-entity percentage
   // (precision view); 'excess' = ranked by subset minus expected based on global
@@ -1658,6 +1663,7 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
     setSubfields({ status: 'loading', rows: [], globalRate: 0 });
     setInstitutions({ status: 'loading', rows: [], globalRate: 0 });
     setPublishers({ status: 'loading', rows: [], globalRate: 0 });
+    setCountries({ status: 'loading', rows: [], globalRate: 0 });
 
     // Fetch a group_by and return a map of key → { count, label }.
     const fetchGroupMap = async (filterStr, groupBy) => {
@@ -1710,12 +1716,13 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
 
     (async () => {
       try {
-        // Eight parallel fetches: subset and total for each of four dimensions.
+        // Ten parallel fetches: subset and total for each of five dimensions.
         const [
           subsetFields, totalFields,
           subsetSubfields, totalSubfields,
           subsetInsts, totalInsts,
           subsetPubs, totalPubs,
+          subsetCtys, totalCtys,
         ] = await Promise.all([
           fetchGroupMap(subsetFilter, 'primary_topic.field.id'),
           fetchGroupMap(totalFilter,  'primary_topic.field.id'),
@@ -1725,6 +1732,8 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
           fetchGroupMap(totalFilter,  'authorships.institutions.id'),
           fetchGroupMap(subsetFilter, 'primary_location.source.host_organization'),
           fetchGroupMap(totalFilter,  'primary_location.source.host_organization'),
+          fetchGroupMap(subsetFilter, 'authorships.countries'),
+          fetchGroupMap(totalFilter,  'authorships.countries'),
         ]);
         if (cancelled) return;
 
@@ -1739,16 +1748,42 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
           filteredTotalInsts  = new Map([...totalInsts].filter(([k]) => allowed.has(k)));
         }
 
+        // Normalise country keys: OpenAlex returns either bare ISO-2 codes or
+        // full URLs like https://openalex.org/countries/TH. Re-key both maps by
+        // the ISO code and drop the active country itself (we want international
+        // collaborators only). The label is the country's display name.
+        const normaliseCountries = (m) => {
+          const out = new Map();
+          for (const [rawKey, entry] of m.entries()) {
+            const match = String(rawKey).match(/\/countries\/([A-Z]{2})$/i);
+            const code = (match ? match[1] : rawKey).toUpperCase();
+            if (!code || code.length !== 2) continue;
+            if (code === country) continue;
+            if (code === 'UNKNOWN') continue;
+            // If two raw keys collapse to the same ISO (shouldn't happen in
+            // practice but be defensive), keep the larger count.
+            const existing = out.get(code);
+            if (!existing || entry.count > existing.count) {
+              out.set(code, { count: entry.count, label: countryName(code) });
+            }
+          }
+          return out;
+        };
+        const subsetCountryMap = normaliseCountries(subsetCtys);
+        const totalCountryMap = normaliseCountries(totalCtys);
+
         setFields({ status: 'ready', ...buildRankedList(subsetFields, totalFields, MIN_WORKS_FOR_FIELD) });
         setSubfields({ status: 'ready', ...buildRankedList(subsetSubfields, totalSubfields, MIN_WORKS_FOR_SUBFIELD) });
         setInstitutions({ status: 'ready', ...buildRankedList(filteredSubsetInsts, filteredTotalInsts, MIN_WORKS_FOR_INSTITUTION) });
         setPublishers({ status: 'ready', ...buildRankedList(subsetPubs, totalPubs, MIN_WORKS_FOR_PUBLISHER) });
+        setCountries({ status: 'ready', ...buildRankedList(subsetCountryMap, totalCountryMap, MIN_WORKS_FOR_COUNTRY) });
       } catch (e) {
         if (cancelled) return;
         setFields({ status: 'error', rows: [], globalRate: 0, error: e.message });
         setSubfields({ status: 'error', rows: [], globalRate: 0, error: e.message });
         setInstitutions({ status: 'error', rows: [], globalRate: 0, error: e.message });
         setPublishers({ status: 'error', rows: [], globalRate: 0, error: e.message });
+        setCountries({ status: 'error', rows: [], globalRate: 0, error: e.message });
       }
     })();
 
@@ -1841,11 +1876,9 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
   return (
     <Card className="p-5 lg:col-span-12">
       <SectionTitle
-        icon={mode === 'cited' ? Sparkles : BookOpen}
-        kicker={mode === 'cited' ? 'Citation insight · cited publications' : 'Citation insight · uncited publications'}
-        title={mode === 'cited'
-          ? 'Where the cited work lives'
-          : 'Where the uncited work lives'}
+        icon={Sparkles}
+        kicker="Citation insight"
+        title={mode === 'cited' ? 'Where the cited work lives' : 'Where the uncited work lives'}
         hint={`${countryName(country)} · top ${TOP_N} per dimension`}
       />
       <p
@@ -1853,9 +1886,55 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
         style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
       >
         {mode === 'cited'
-          ? `A profile of the institutions, fields, subfields, and publishers most strongly associated with works that have received at least one citation. Use the toggle below to switch between two views: ranking by within-entity percentage (treats every group as equal regardless of size) or ranking by extra count vs. expected (rewards groups that beat the country-wide rate at scale).`
+          ? `A profile of the institutions, fields, subfields, publishers, and collaborator countries most strongly associated with ${countryName(country)}-affiliated works that have received at least one citation. Toggle between two ranking views: within-entity percentage (treats every group as equal regardless of size) or extra count vs expected (rewards groups that beat the country-wide rate at scale).`
           : `A profile of where uncited works concentrate. Bigger uncited counts in some entities reflect citation lag for very recent works; persistent uncited shares in older works often signal a structural issue worth investigating.`}
       </p>
+
+      {/* Mode toggle: switches between the cited and uncited subset.
+          Triggers a refetch since each mode loads its own subset. */}
+      <div
+        className="mb-2 flex flex-wrap items-center gap-2 rounded-sm px-3 py-2"
+        style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
+      >
+        <span
+          style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+          className="uppercase"
+        >
+          Show
+        </span>
+        <button
+          onClick={() => setMode('cited')}
+          className="rounded-sm px-2.5 py-1"
+          style={{
+            border: `1px solid ${mode === 'cited' ? PALETTE.rust : PALETTE.rule}`,
+            background: mode === 'cited' ? PALETTE.rust : 'transparent',
+            color: mode === 'cited' ? PALETTE.cream : PALETTE.charcoal,
+            fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+          }}
+        >
+          Cited publications
+        </button>
+        <button
+          onClick={() => setMode('uncited')}
+          className="rounded-sm px-2.5 py-1"
+          style={{
+            border: `1px solid ${mode === 'uncited' ? PALETTE.charcoal : PALETTE.rule}`,
+            background: mode === 'uncited' ? PALETTE.charcoal : 'transparent',
+            color: mode === 'uncited' ? PALETTE.cream : PALETTE.charcoal,
+            fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+          }}
+        >
+          Uncited publications
+        </button>
+        <span
+          style={{
+            fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted,
+            marginLeft: 'auto', maxWidth: 480, lineHeight: 1.4,
+          }}
+        >
+          Switching reloads the section to fetch the subset of works that match the chosen view.
+        </span>
+      </div>
 
       {/* Sort toggle: switches the metric used to rank each panel. */}
       <div
@@ -1905,11 +1984,18 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
               // is concrete rather than abstract. We use the country rate from the
               // active tab and a plausible round number for "entity size" so the
               // arithmetic reads naturally.
-              const tabSingular = dimensionTab === 'institutions' ? 'institution' : (dimensionTab === 'subfields' ? 'subfield' : 'field');
-              const tabPlural = dimensionTab === 'institutions' ? 'institutions' : (dimensionTab === 'subfields' ? 'subfields' : 'fields');
+              const labels = {
+                institutions: { singular: 'institution',          plural: 'institutions',           data: institutions },
+                fields:       { singular: 'field',                plural: 'fields',                 data: fields },
+                subfields:    { singular: 'subfield',             plural: 'subfields',              data: subfields },
+                publishers:   { singular: 'publisher',            plural: 'publishers',             data: publishers },
+                countries:    { singular: 'collaborator country', plural: 'collaborator countries', data: countries },
+              };
+              const meta = labels[dimensionTab] || labels.institutions;
+              const tabSingular = meta.singular;
+              const tabPlural = meta.plural;
               const verb = mode === 'cited' ? 'cited' : 'uncited';
-              const data = dimensionTab === 'fields' ? fields : (dimensionTab === 'subfields' ? subfields : institutions);
-              const ratePct = data.globalRate ? Math.round(data.globalRate * 100) : null;
+              const ratePct = meta.data.globalRate ? Math.round(meta.data.globalRate * 100) : null;
               if (sortMode === 'share') {
                 return (
                   <>
@@ -1941,10 +2027,11 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
         {/* Dimension tabs: order matches the rest of the dashboard (Institutions first). */}
         <div className="mb-3 flex flex-wrap items-center gap-1.5">
           {[
-            { key: 'institutions', label: 'Institutions', data: institutions, min: MIN_WORKS_FOR_INSTITUTION },
-            { key: 'fields',       label: 'Fields',       data: fields,       min: MIN_WORKS_FOR_FIELD },
-            { key: 'subfields',    label: 'Subfields',    data: subfields,    min: MIN_WORKS_FOR_SUBFIELD },
-            { key: 'publishers',   label: 'Publishers',   data: publishers,   min: MIN_WORKS_FOR_PUBLISHER },
+            { key: 'institutions', label: 'Institutions',     data: institutions, min: MIN_WORKS_FOR_INSTITUTION },
+            { key: 'fields',       label: 'Fields',           data: fields,       min: MIN_WORKS_FOR_FIELD },
+            { key: 'subfields',    label: 'Subfields',        data: subfields,    min: MIN_WORKS_FOR_SUBFIELD },
+            { key: 'publishers',   label: 'Publishers',       data: publishers,   min: MIN_WORKS_FOR_PUBLISHER },
+            { key: 'countries',    label: 'Collaborator countries', data: countries, min: MIN_WORKS_FOR_COUNTRY },
           ].map((tab) => {
             const isActive = dimensionTab === tab.key;
             const n = tab.data.rows?.length || 0;
@@ -1979,6 +2066,7 @@ const CitationInsightSection = ({ mode, year, country, baseFilterStr, countryIns
             fields:       { data: fields,       min: MIN_WORKS_FOR_FIELD,       singular: 'field' },
             subfields:    { data: subfields,    min: MIN_WORKS_FOR_SUBFIELD,    singular: 'subfield' },
             publishers:   { data: publishers,   min: MIN_WORKS_FOR_PUBLISHER,   singular: 'publisher' },
+            countries:    { data: countries,    min: MIN_WORKS_FOR_COUNTRY,     singular: 'collaborator country' },
           }[dimensionTab];
           return (
             <div className="grid grid-cols-1 gap-6 md:grid-cols-5">
@@ -3741,17 +3829,9 @@ export default function ResearchOutputDashboard() {
             />
           </Card>
 
-          {/* Two citation-insight sections (cited and uncited). Each renders its
-              own scatter + ranking with the four-dimension tab selector. */}
+          {/* Merged citation-insight section. The mode toggle inside the section
+              switches between cited and uncited subsets without duplicating chrome. */}
           <CitationInsightSection
-            mode="cited"
-            year={year}
-            country={country}
-            baseFilterStr={filterStrings.all}
-            countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
-          />
-          <CitationInsightSection
-            mode="uncited"
             year={year}
             country={country}
             baseFilterStr={filterStrings.all}
