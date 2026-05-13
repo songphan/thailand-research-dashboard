@@ -650,11 +650,12 @@ const InstPill = ({ active, onClick, label, subtle = false, color = null }) => {
   );
 };
 
-// Two stacked horizontal bars showing cited vs uncited share for the current
-// year and the prior year. Uses the dashboard's palette: rust for cited (strong
-// signal), cream/charcoal for uncited (recessive). Numbers and percentages render
-// inside each segment when there's room; otherwise they sit beside the bar.
-const CitationReachBars = ({ currentCited, currentUncited, prevCited, prevUncited, year, status, error }) => {
+// Stacked horizontal bars showing cited vs uncited share for the active year
+// and up to five prior years. The active row sits at top in full rust + cream;
+// prior years sit below in a desaturated, lighter shade so the eye reads them
+// as comparison context rather than primary data. The active row's cited and
+// uncited counts are clickable when onDrillDown is provided.
+const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
   if (status === 'error') {
     return (
       <div style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-3">
@@ -662,27 +663,8 @@ const CitationReachBars = ({ currentCited, currentUncited, prevCited, prevUncite
       </div>
     );
   }
-  const rows = [];
-  const curTotal = (currentCited || 0) + (currentUncited || 0);
-  if (curTotal > 0) {
-    rows.push({
-      label: String(year),
-      cited: currentCited || 0,
-      uncited: currentUncited || 0,
-      total: curTotal,
-      emphasis: true,
-    });
-  }
-  const prevTotal = (prevCited || 0) + (prevUncited || 0);
-  if (prevTotal > 0) {
-    rows.push({
-      label: String(year - 1),
-      cited: prevCited || 0,
-      uncited: prevUncited || 0,
-      total: prevTotal,
-      emphasis: false,
-    });
-  }
+  // series: [{ year, cited, uncited, emphasis }, ...] with the active year first.
+  const rows = (series || []).filter((r) => (r.cited || 0) + (r.uncited || 0) > 0);
   if (rows.length === 0) {
     return (
       <div style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-6">
@@ -691,47 +673,74 @@ const CitationReachBars = ({ currentCited, currentUncited, prevCited, prevUncite
     );
   }
 
-  // Compare cited share between current and previous year (when both present).
-  const sharesDelta = rows.length === 2
-    ? ((rows[0].cited / rows[0].total) - (rows[1].cited / rows[1].total)) * 100
+  // Palette for the bars. The active row uses full rust + cream; comparison rows
+  // use a lighter, desaturated rust on a cooler off-cream so they read as muted.
+  const CITED_ACTIVE = PALETTE.rust;
+  const UNCITED_ACTIVE = PALETTE.cream;
+  const CITED_COMPARE = 'rgba(160, 79, 31, 0.32)';   // rust at 32% opacity over paper
+  const UNCITED_COMPARE = 'rgba(217, 207, 190, 0.45)'; // rule colour, very faint
+  const TEXT_ACTIVE_ON_CITED = PALETTE.cream;
+  const TEXT_ACTIVE_ON_UNCITED = PALETTE.charcoal;
+  const TEXT_COMPARE = PALETTE.muted;
+
+  // Year-over-year delta vs the most recent comparison row, when present.
+  const active = rows.find((r) => r.emphasis);
+  const firstCompare = rows.find((r) => !r.emphasis);
+  const sharesDelta = active && firstCompare
+    ? ((active.cited / (active.cited + active.uncited)) -
+       (firstCompare.cited / (firstCompare.cited + firstCompare.uncited))) * 100
     : null;
 
   return (
     <div className="space-y-3">
       {rows.map((r) => {
-        const citedPct = r.cited / r.total;
-        const uncitedPct = r.uncited / r.total;
+        const total = r.cited + r.uncited;
+        const citedPct = r.cited / total;
+        const uncitedPct = r.uncited / total;
         const citedPctStr = (citedPct * 100).toFixed(1) + '%';
         const uncitedPctStr = (uncitedPct * 100).toFixed(1) + '%';
         const showCitedInline = citedPct > 0.18;
         const showUncitedInline = uncitedPct > 0.18;
+
+        const citedBg = r.emphasis ? CITED_ACTIVE : CITED_COMPARE;
+        const uncitedBg = r.emphasis ? UNCITED_ACTIVE : UNCITED_COMPARE;
+        const citedTextColor = r.emphasis ? TEXT_ACTIVE_ON_CITED : TEXT_COMPARE;
+        const uncitedTextColor = r.emphasis ? TEXT_ACTIVE_ON_UNCITED : TEXT_COMPARE;
+
+        const clickable = r.emphasis && !!onDrillDown;
+        const handleCited = clickable ? () => onDrillDown('cited') : undefined;
+        const handleUncited = clickable ? () => onDrillDown('uncited') : undefined;
+        const segmentCursor = clickable ? 'pointer' : 'default';
+
         return (
-          <div key={r.label}>
+          <div key={r.year}>
             <div className="flex items-baseline justify-between">
               <div className="flex items-baseline gap-3">
                 <span
                   style={{
                     fontFamily: FONT_DISPLAY, fontStyle: 'italic',
-                    fontSize: r.emphasis ? 22 : 16,
+                    fontSize: r.emphasis ? 22 : 15,
                     fontWeight: 500,
-                    color: r.emphasis ? PALETTE.ink : PALETTE.charcoal,
+                    color: r.emphasis ? PALETTE.ink : PALETTE.muted,
                     lineHeight: 1,
                   }}
                 >
-                  {r.label}
+                  {r.year}
                 </span>
                 <span
                   style={{
-                    fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted,
+                    fontFamily: FONT_MONO, fontSize: 11,
+                    color: r.emphasis ? PALETTE.muted : PALETTE.rule,
                     letterSpacing: '0.04em',
                   }}
                 >
-                  {fmtFull(r.total)} works
+                  {fmtFull(total)} works
                 </span>
               </div>
               <span
                 style={{
-                  fontFamily: FONT_MONO, fontSize: 11, color: r.emphasis ? PALETTE.ink : PALETTE.muted,
+                  fontFamily: FONT_MONO, fontSize: 11,
+                  color: r.emphasis ? PALETTE.ink : PALETTE.muted,
                   letterSpacing: '0.04em', fontWeight: r.emphasis ? 500 : 400,
                 }}
               >
@@ -741,50 +750,66 @@ const CitationReachBars = ({ currentCited, currentUncited, prevCited, prevUncite
             <div
               className="mt-1.5 flex w-full overflow-hidden"
               style={{
-                height: r.emphasis ? 30 : 22,
+                height: r.emphasis ? 30 : 16,
                 borderRadius: 2,
-                border: `1px solid ${PALETTE.rule}`,
+                border: `1px solid ${r.emphasis ? PALETTE.rule : 'transparent'}`,
               }}
               role="img"
-              aria-label={`${r.label}: ${fmtFull(r.cited)} cited (${citedPctStr}), ${fmtFull(r.uncited)} uncited (${uncitedPctStr}).`}
+              aria-label={`${r.year}: ${fmtFull(r.cited)} cited (${citedPctStr}), ${fmtFull(r.uncited)} uncited (${uncitedPctStr}).`}
             >
               <div
+                onClick={handleCited}
                 style={{
                   width: `${citedPct * 100}%`,
-                  background: PALETTE.rust,
-                  color: PALETTE.cream,
+                  background: citedBg,
+                  color: citedTextColor,
                   fontFamily: FONT_MONO,
                   fontSize: 11,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'flex-start',
-                  paddingLeft: 8,
+                  paddingLeft: r.emphasis ? 8 : 0,
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
-                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.15s',
+                  cursor: segmentCursor,
                 }}
-                title={`Cited: ${fmtFull(r.cited)} (${citedPctStr})`}
+                title={clickable ? `Click to see top fields for cited works (${fmtFull(r.cited)})` : `Cited: ${fmtFull(r.cited)} (${citedPctStr})`}
+                onMouseEnter={(e) => { if (clickable) e.currentTarget.style.filter = 'brightness(1.08)'; }}
+                onMouseLeave={(e) => { if (clickable) e.currentTarget.style.filter = ''; }}
               >
-                {showCitedInline && `${fmtFull(r.cited)} cited`}
+                {r.emphasis && showCitedInline && (
+                  <span style={{ textDecoration: clickable ? 'underline' : 'none', textUnderlineOffset: 3 }}>
+                    {fmtFull(r.cited)} cited
+                  </span>
+                )}
               </div>
               <div
+                onClick={handleUncited}
                 style={{
                   width: `${uncitedPct * 100}%`,
-                  background: PALETTE.cream,
-                  color: PALETTE.charcoal,
+                  background: uncitedBg,
+                  color: uncitedTextColor,
                   fontFamily: FONT_MONO,
                   fontSize: 11,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'flex-end',
-                  paddingRight: 8,
+                  paddingRight: r.emphasis ? 8 : 0,
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
-                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.15s',
+                  cursor: segmentCursor,
                 }}
-                title={`Uncited: ${fmtFull(r.uncited)} (${uncitedPctStr})`}
+                title={clickable ? `Click to see top fields for uncited works (${fmtFull(r.uncited)})` : `Uncited: ${fmtFull(r.uncited)} (${uncitedPctStr})`}
+                onMouseEnter={(e) => { if (clickable) e.currentTarget.style.filter = 'brightness(0.96)'; }}
+                onMouseLeave={(e) => { if (clickable) e.currentTarget.style.filter = ''; }}
               >
-                {showUncitedInline && `${fmtFull(r.uncited)} uncited`}
+                {r.emphasis && showUncitedInline && (
+                  <span style={{ textDecoration: clickable ? 'underline' : 'none', textUnderlineOffset: 3 }}>
+                    {fmtFull(r.uncited)} uncited
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -792,7 +817,7 @@ const CitationReachBars = ({ currentCited, currentUncited, prevCited, prevUncite
       })}
       {sharesDelta !== null && (
         <div
-          className="mt-2 flex items-center gap-2 rounded-sm px-3 py-2"
+          className="mt-2 flex flex-wrap items-center gap-2 rounded-sm px-3 py-2"
           style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
         >
           <span
@@ -808,11 +833,22 @@ const CitationReachBars = ({ currentCited, currentUncited, prevCited, prevUncite
             <strong style={{ color: sharesDelta >= 0 ? PALETTE.forest : PALETTE.burgundy }}>
               {sharesDelta >= 0 ? '↑' : '↓'} {Math.abs(sharesDelta).toFixed(1)} pp
             </strong>{' '}
-            vs {year - 1}.{' '}
+            vs {firstCompare.year}.{' '}
             <span style={{ color: PALETTE.muted, fontSize: 11.5 }}>
-              Some of this gap reflects the citation lag for the most recent year and will close as the corpus ages.
+              Some of this gap reflects citation lag for recent years and will close as the corpus ages.
             </span>
           </span>
+        </div>
+      )}
+      {onDrillDown && active && (
+        <div
+          style={{
+            fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.1em',
+            color: PALETTE.muted, marginTop: 2,
+          }}
+          className="uppercase"
+        >
+          Tip · Click "{fmtFull(active.cited)} cited" or "{fmtFull(active.uncited)} uncited" to see top fields
         </div>
       )}
     </div>
@@ -1401,6 +1437,196 @@ const TableModal = ({
   );
 };
 
+// Drill-down modal showing top fields and subfields for the cited or uncited
+// subset of the active selection. Fetches happen when the modal opens and the
+// mode (cited/uncited) determines the additional filter clause. Each side shows
+// top 10. The modal closes on Esc or backdrop click.
+const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr }) => {
+  const [fields, setFields] = useState({ status: 'idle', data: [], total: 0 });
+  const [subfields, setSubfields] = useState({ status: 'idle', data: [], total: 0 });
+
+  useEffect(() => {
+    if (!open || !mode) return;
+    let cancelled = false;
+    const citationClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
+    const filterStr = `${baseFilterStr},${citationClause}`;
+    setFields({ status: 'loading', data: [], total: 0 });
+    setSubfields({ status: 'loading', data: [], total: 0 });
+
+    const fetchTop = async (groupBy) => {
+      const url = withMailto(
+        `${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=200`
+      );
+      const j = await fetchJson(url);
+      const groups = (j.group_by || [])
+        .filter((g) => g.key && g.key !== 'unknown')
+        .map((g) => ({ key: g.key, label: g.key_display_name, value: g.count }));
+      const totalAcrossGroups = groups.reduce((s, g) => s + g.value, 0);
+      return { groups, totalAcrossGroups };
+    };
+
+    (async () => {
+      try {
+        const [fRes, sRes] = await Promise.all([
+          fetchTop('primary_topic.field.id'),
+          fetchTop('primary_topic.subfield.id'),
+        ]);
+        if (cancelled) return;
+        setFields({ status: 'ready', data: fRes.groups.slice(0, 10), total: fRes.totalAcrossGroups });
+        setSubfields({ status: 'ready', data: sRes.groups.slice(0, 10), total: sRes.totalAcrossGroups });
+      } catch (e) {
+        if (cancelled) return;
+        setFields({ status: 'error', data: [], total: 0, error: e.message });
+        setSubfields({ status: 'error', data: [], total: 0, error: e.message });
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [open, mode, baseFilterStr]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const titleMode = mode === 'cited' ? 'cited at least once' : 'still uncited';
+  const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
+
+  const renderList = ({ status, data, total }) => {
+    if (status === 'loading') {
+      return (
+        <div className="flex items-center gap-2 px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+          <Loader2 size={14} className="animate-spin" /> Loading…
+        </div>
+      );
+    }
+    if (status === 'error') {
+      return <div className="px-3 py-6" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>Could not load.</div>;
+    }
+    if (!data || data.length === 0) {
+      return <div className="px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>No data.</div>;
+    }
+    const max = data[0]?.value || 1;
+    return (
+      <ol className="space-y-1.5">
+        {data.map((d, i) => {
+          const widthPct = (d.value / max) * 100;
+          const sharePct = pct(d.value, total);
+          return (
+            <li key={d.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '24px 1fr 70px' }}>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, textAlign: 'right' }}>{i + 1}</span>
+              <div className="relative" style={{ height: 22, background: PALETTE.cream, borderRadius: 2 }}>
+                <div
+                  style={{
+                    position: 'absolute', left: 0, top: 0, bottom: 0,
+                    width: `${widthPct}%`,
+                    background: accent,
+                    opacity: 0.18,
+                    borderRadius: 2,
+                  }}
+                />
+                <span
+                  className="absolute inset-y-0 left-2 flex items-center"
+                  style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.ink }}
+                >
+                  {d.label}
+                </span>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
+                  {fmtFull(d.value)}
+                </div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>{sharePct}</div>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    );
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(26, 22, 18, 0.55)', fontFamily: FONT_BODY }}
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[88vh] w-full max-w-4xl flex-col rounded-md"
+        style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.ink}` }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-start justify-between gap-4 border-b px-5 py-4" style={{ borderColor: PALETTE.rule }}>
+          <div>
+            <div
+              style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.2em' }}
+              className="uppercase"
+            >
+              Citation reach · drill-down · {year}
+            </div>
+            <h3
+              style={{ fontFamily: FONT_DISPLAY, color: PALETTE.ink, fontSize: 22, fontWeight: 500, fontStyle: 'italic', lineHeight: 1.15 }}
+              className="mt-0.5"
+            >
+              Top fields and subfields for works {titleMode}
+            </h3>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }} className="mt-1">
+              {countryName(country)} · respects active filters · top 10 of each
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-sm"
+            style={{ border: `1px solid ${PALETTE.rule}`, color: PALETTE.ink, background: 'transparent' }}
+            aria-label="Close"
+          >
+            <X size={14} />
+          </button>
+        </header>
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+            <div>
+              <div
+                style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                className="uppercase mb-2"
+              >
+                Top fields
+              </div>
+              {renderList(fields)}
+            </div>
+            <div>
+              <div
+                style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                className="uppercase mb-2"
+              >
+                Top subfields
+              </div>
+              {renderList(subfields)}
+            </div>
+          </div>
+        </div>
+        <footer
+          className="border-t px-5 py-3"
+          style={{ borderColor: PALETTE.rule, fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }}
+        >
+          <span className="uppercase">
+            Esc to close · Shares are of total field/subfield assignments in this subset
+          </span>
+        </footer>
+      </div>
+    </div>
+  );
+};
+
 // OpenAlex institution.type values (per https://docs.openalex.org/api-entities/institutions).
 // We surface these as filter pills above the institutions chart, and the same colours
 // are used for the y-axis labels in the producing-institutions chart so the visual
@@ -1972,6 +2198,11 @@ export default function ResearchOutputDashboard() {
   const [instTypeFilter, setInstTypeFilter] = useState('all');
   const [instSubcategoryFilter, setInstSubcategoryFilter] = useState('all');
 
+  // 'cited' | 'uncited' | null. When set, opens a drill-down modal showing
+  // top fields and subfields for the corresponding subset of the active year's
+  // works. Respects every active filter (chip filters, type/subcategory pills).
+  const [citationDrill, setCitationDrill] = useState(null);
+
   const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
   const sliceFor = (dim) => (state[dim]?.data || []).slice(0, limitFor(dim));
@@ -2175,17 +2406,20 @@ export default function ResearchOutputDashboard() {
     run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
     run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
 
-    // Same split but for the previous year, so we can show YoY comparison in the
-    // visibility-overview card. We swap publication_year in the filter string while
-    // keeping every other clause (country, chip filters, synthetic institution filter).
-    if (year > 2000) {
+    // Same split but for prior years (up to 5), for the visibility overview card.
+    // We swap publication_year in the filter string while keeping every other clause
+    // (country, chip filters, synthetic institution filter) intact. State keys are
+    // prevYearCited_1 through prevYearCited_5 (and uncited_1..5), where the number is
+    // the offset from the active year.
+    for (let offset = 1; offset <= 5; offset++) {
+      const targetYear = year - offset;
+      if (targetYear < 2000) break;
       const prevYearAll = filterStrings.all.replace(
         new RegExp(`publication_year:${year}\\b`),
-        `publication_year:${year - 1}`
+        `publication_year:${targetYear}`
       );
-      run('prevYearTotal',   countUrl(prevYearAll),                            (j) => j?.meta?.count ?? 0);
-      run('prevYearCited',   countUrl(prevYearAll, 'cited_by_count:>0'),       (j) => j?.meta?.count ?? 0);
-      run('prevYearUncited', countUrl(prevYearAll, 'cited_by_count:0'),        (j) => j?.meta?.count ?? 0);
+      run(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
+      run(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0);
     }
 
     run('topWorks', topWorksUrl(filterStrings.all), (j) =>
@@ -3012,13 +3246,24 @@ export default function ResearchOutputDashboard() {
               uncited share in the latest year is normal and decays as the corpus ages.
             </p>
             <CitationReachBars
-              currentCited={state.citedShare?.data}
-              currentUncited={state.uncitedShare?.data}
-              prevCited={state.prevYearCited?.data}
-              prevUncited={state.prevYearUncited?.data}
+              series={[
+                {
+                  year,
+                  cited: state.citedShare?.data || 0,
+                  uncited: state.uncitedShare?.data || 0,
+                  emphasis: true,
+                },
+                ...[1, 2, 3, 4, 5].map((offset) => ({
+                  year: year - offset,
+                  cited: state[`prevYearCited_${offset}`]?.data || 0,
+                  uncited: state[`prevYearUncited_${offset}`]?.data || 0,
+                  emphasis: false,
+                })),
+              ]}
               year={year}
               status={state.citedShare?.status}
               error={state.citedShare?.error}
+              onDrillDown={(mode) => setCitationDrill(mode)}
             />
           </Card>
 
@@ -3200,6 +3445,14 @@ export default function ResearchOutputDashboard() {
               });
             }
           : undefined}
+      />
+      <CitationDrillModal
+        open={!!citationDrill}
+        mode={citationDrill}
+        onClose={() => setCitationDrill(null)}
+        year={year}
+        country={country}
+        baseFilterStr={filterStrings.all}
       />
     </div>
   );
