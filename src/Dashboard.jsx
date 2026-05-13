@@ -1420,7 +1420,7 @@ const TableModal = ({
 // muted grey. A dashed horizontal reference line at the global rate makes the
 // "above/below expected" interpretation visible at a glance. Hovering a dot shows
 // its label and counts in a small tooltip.
-const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMode, topN }) => {
+const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMode, topN, meanCitesMap }) => {
   const W = 560;
   const H = 320;
   const PAD = { top: 14, right: 20, bottom: 36, left: 44 };
@@ -1432,12 +1432,19 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
 
   // Compute top-N keys to highlight, mirroring the sort logic from renderList.
   const topKeys = React.useMemo(() => {
-    const sorted = [...(rows || [])].sort((a, b) => {
+    let decorated = rows || [];
+    if (sortMode === 'meanCites' && meanCitesMap) {
+      decorated = decorated
+        .map((r) => ({ ...r, meanCites: meanCitesMap.get(r.key) }))
+        .filter((r) => r.meanCites !== undefined && r.meanCites !== null);
+    }
+    const sorted = [...decorated].sort((a, b) => {
       if (sortMode === 'excess') return b.excess - a.excess;
+      if (sortMode === 'meanCites') return (b.meanCites || 0) - (a.meanCites || 0);
       return b.share - a.share || b.total - a.total;
     });
     return new Set(sorted.slice(0, topN).map((d) => d.key));
-  }, [rows, sortMode, topN]);
+  }, [rows, sortMode, topN, meanCitesMap]);
 
   if (status === 'loading') {
     return (
@@ -1612,6 +1619,9 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
             {hover.excess !== undefined && (
               <span> · {hover.excess >= 0 ? '+' : ''}{Math.round(hover.excess).toLocaleString()} vs expected</span>
             )}
+            {meanCitesMap && meanCitesMap.get(hover.key) != null && (
+              <span> · {meanCitesMap.get(hover.key).toFixed(1)} mean cites/work</span>
+            )}
           </div>
         </div>
       )}
@@ -1647,11 +1657,18 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
 
   // Sort mode for the ranking. 'share' = ranked by within-entity percentage
   // (precision view); 'excess' = ranked by subset minus expected based on global
-  // rate (volume-aware view).
+  // rate (volume-aware view); 'meanCites' = ranked by average citations per work
+  // within each entity (combines volume and depth). meanCites is lazy-loaded
+  // because computing it requires one extra API call per top entity.
   const [sortMode, setSortMode] = useState('share');
   // Default to institutions tab since institutional patterns are the most
   // policy-actionable lens for OAR readers.
   const [dimensionTab, setDimensionTab] = useState('institutions');
+
+  // Lazy cache for mean-cites-per-work data. Keyed by dimension; each entry is
+  // { status, data: Map<entityKey, number> }. Cleared whenever mode or
+  // baseFilterStr changes (because the underlying subset of works changes).
+  const [meanCitesByDim, setMeanCitesByDim] = useState({});
 
   useEffect(() => {
     if (!mode) return;
@@ -1664,6 +1681,9 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
     setInstitutions({ status: 'loading', rows: [], globalRate: 0 });
     setPublishers({ status: 'loading', rows: [], globalRate: 0 });
     setCountries({ status: 'loading', rows: [], globalRate: 0 });
+    // Mean-cites cache is invalidated whenever the underlying subset changes.
+    // The user will need to click Mean cites/work again to recompute.
+    setMeanCitesByDim({});
 
     // Fetch a group_by and return a map of key → { count, label }.
     const fetchGroupMap = async (filterStr, groupBy) => {
@@ -1790,6 +1810,82 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
     return () => { cancelled = true; };
   }, [mode, baseFilterStr, countryInstitutionIds]);
 
+  // Lazy fetcher for mean-cites-per-work. Fires only when the user activates the
+  // 'meanCites' sort mode and the cache for the active tab isn't populated. For
+  // each top-N entity (by total works), we fire one /works request that filters
+  // to that entity within the active subset, group_by cited_by_count, and sum
+  // (key × count) to get the entity's total citations. Mean = total / works.
+  //
+  // We cap per-tab fetches at top 30 entities by total works. The top 20 by
+  // mean cites/work will overwhelmingly come from this pool, because high mean
+  // cites usually correlates positively with size (popular fields draw more
+  // collaborators and citation networks). Tiny entities with extreme means are
+  // already filtered out by the min-works threshold.
+  useEffect(() => {
+    if (sortMode !== 'meanCites') return;
+    // Identify the active tab's data and the filter expression for "entity = X"
+    // we'll use when fetching per-entity citations.
+    const tabSource = {
+      institutions: { data: institutions, filterKey: 'authorships.institutions.id' },
+      fields:       { data: fields,       filterKey: 'primary_topic.field.id' },
+      subfields:    { data: subfields,    filterKey: 'primary_topic.subfield.id' },
+      publishers:   { data: publishers,   filterKey: 'primary_location.source.host_organization' },
+      countries:    { data: countries,    filterKey: 'authorships.countries' },
+    }[dimensionTab];
+    if (!tabSource || tabSource.data.status !== 'ready') return;
+    // Already cached or in-flight? Skip.
+    const cached = meanCitesByDim[dimensionTab];
+    if (cached && (cached.status === 'ready' || cached.status === 'loading')) return;
+
+    const subsetClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
+    const subsetFilter = `${baseFilterStr},${subsetClause}`;
+    const topEntities = [...tabSource.data.rows]
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 30);
+    if (topEntities.length === 0) return;
+
+    let cancelled = false;
+    setMeanCitesByDim((m) => ({ ...m, [dimensionTab]: { status: 'loading', data: new Map() } }));
+
+    const fetchMean = async (entity) => {
+      // Normalise entity.key to the form OpenAlex's filter parameter accepts.
+      // For institutions/fields/subfields/publishers OpenAlex returns full URLs
+      // like https://openalex.org/I123; the filter expects the bare ID. For
+      // countries the key is already an ISO-2 code. normalizeFilterValue handles
+      // all of these forms.
+      const filterValue = normalizeFilterValue(entity.key);
+      const url = withMailto(
+        `${OPENALEX_BASE}/works?filter=${subsetFilter},${tabSource.filterKey}:${encodeURIComponent(filterValue)}` +
+        `&group_by=cited_by_count&per-page=200`
+      );
+      try {
+        const j = await fetchJson(url);
+        let totalCites = 0;
+        let totalWorks = 0;
+        for (const g of j.group_by || []) {
+          const cites = Number(g.key) || 0;
+          const works = g.count || 0;
+          totalCites += cites * works;
+          totalWorks += works;
+        }
+        return [entity.key, totalWorks > 0 ? totalCites / totalWorks : 0];
+      } catch {
+        return [entity.key, null];
+      }
+    };
+
+    Promise.all(topEntities.map(fetchMean)).then((results) => {
+      if (cancelled) return;
+      const out = new Map();
+      for (const [k, v] of results) {
+        if (v !== null) out.set(k, v);
+      }
+      setMeanCitesByDim((m) => ({ ...m, [dimensionTab]: { status: 'ready', data: out } }));
+    });
+
+    return () => { cancelled = true; };
+  }, [sortMode, dimensionTab, mode, baseFilterStr, fields.status, subfields.status, institutions.status, publishers.status, countries.status]);
+
   const titleMode = mode === 'cited' ? 'cited at least once' : 'still uncited';
   const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
   const shareLabel = mode === 'cited' ? '% cited' : '% uncited';
@@ -1812,27 +1908,51 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
         </div>
       );
     }
+
+    // For mean-cites mode, decorate rows with the cached mean (if computed).
+    // Rows without a cached mean are excluded from the ranking (they sit
+    // outside the top 30 we fetched).
+    const meanState = meanCitesByDim[dimensionTab];
+    const meanCacheReady = sortMode === 'meanCites' && meanState?.status === 'ready';
+    const meanCacheLoading = sortMode === 'meanCites' && (meanState?.status === 'loading' || !meanState);
+    if (meanCacheLoading) {
+      return (
+        <div className="flex items-center gap-2 px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+          <Loader2 size={14} className="animate-spin" />
+          <span>Computing mean citations per work (one call per entity, up to 30 entities)…</span>
+        </div>
+      );
+    }
+    const decorated = sortMode === 'meanCites'
+      ? rows
+          .map((r) => ({ ...r, meanCites: meanState.data.get(r.key) }))
+          .filter((r) => r.meanCites !== undefined && r.meanCites !== null)
+      : rows;
+
     // Sort the precomputed rows by the active mode, then take top-N.
-    const sorted = [...rows].sort((a, b) => {
+    const sorted = [...decorated].sort((a, b) => {
       if (sortMode === 'excess') return b.excess - a.excess;
+      if (sortMode === 'meanCites') return (b.meanCites || 0) - (a.meanCites || 0);
       // Default: share desc, then total desc as tiebreaker
       return b.share - a.share || b.total - a.total;
     }).slice(0, TOP_N);
-    // Bar width baseline depends on mode. For share, full bar = 100%. For excess,
-    // we scale to the max absolute excess in the visible slice so positive and
-    // negative deltas remain visually proportional.
+    // Bar width baseline depends on mode.
     const maxAbsExcess = sortMode === 'excess'
       ? Math.max(1, ...sorted.map((d) => Math.abs(d.excess)))
+      : 1;
+    const maxMeanCites = sortMode === 'meanCites'
+      ? Math.max(0.01, ...sorted.map((d) => d.meanCites || 0))
       : 1;
     return (
       <ol className="space-y-1.5">
         {sorted.map((d, i) => {
           const sharePct = (d.share * 100).toFixed(1) + '%';
           const excessStr = (d.excess >= 0 ? '+' : '') + Math.round(d.excess).toLocaleString();
+          const meanStr = d.meanCites != null ? d.meanCites.toFixed(1) : '—';
           // Primary metric for bar width is whichever sort mode is active.
-          const widthPct = sortMode === 'share'
-            ? d.share * 100
-            : (Math.abs(d.excess) / maxAbsExcess) * 100;
+          let widthPct = d.share * 100;
+          if (sortMode === 'excess') widthPct = (Math.abs(d.excess) / maxAbsExcess) * 100;
+          if (sortMode === 'meanCites') widthPct = ((d.meanCites || 0) / maxMeanCites) * 100;
           const excessNegative = sortMode === 'excess' && d.excess < 0;
           return (
             <li key={d.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '24px 1fr 96px' }}>
@@ -1858,12 +1978,12 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
               <div style={{ textAlign: 'right' }}>
                 {/* Primary metric (large), secondary metric (small) */}
                 <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
-                  {sortMode === 'excess' ? excessStr : sharePct}
+                  {sortMode === 'excess' ? excessStr : (sortMode === 'meanCites' ? meanStr : sharePct)}
                 </div>
                 <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>
-                  {sortMode === 'excess'
-                    ? `${sharePct} · ${fmtFull(d.total)}`
-                    : `${excessStr} · ${fmtFull(d.subset)} / ${fmtFull(d.total)}`}
+                  {sortMode === 'excess' && `${sharePct} · ${fmtFull(d.total)}`}
+                  {sortMode === 'meanCites' && `${sharePct} · ${fmtFull(d.total)} works`}
+                  {sortMode === 'share' && `${excessStr} · ${fmtFull(d.subset)} / ${fmtFull(d.total)}`}
                 </div>
               </div>
             </li>
@@ -1973,6 +2093,19 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
           >
             By extra count
           </button>
+          <button
+            onClick={() => setSortMode('meanCites')}
+            className="rounded-sm px-2.5 py-1"
+            style={{
+              border: `1px solid ${sortMode === 'meanCites' ? PALETTE.ink : PALETTE.rule}`,
+              background: sortMode === 'meanCites' ? PALETTE.ink : 'transparent',
+              color: sortMode === 'meanCites' ? PALETTE.cream : PALETTE.charcoal,
+              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.04em',
+            }}
+            title="Rank by average citations per work within each entity. Loads on demand (one extra call per top entity)."
+          >
+            By mean cites/work
+          </button>
           <span
             style={{
               fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted,
@@ -2002,6 +2135,16 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
                     Ranks {tabPlural} by what percentage of their works are {verb}.
                     A {tabSingular} with 50 works where 45 are {verb} (90%) outranks a {tabSingular} with 5,000 works where 4,000 are {verb} (80%).
                     Size doesn't matter, only the rate.
+                  </>
+                );
+              }
+              if (sortMode === 'meanCites') {
+                return (
+                  <>
+                    Ranks {tabPlural} by the average citations per work within each {tabSingular}.
+                    A {tabSingular} where works average 12 citations each ranks above one where works average 4 citations,
+                    even if the second has more total works. Combines volume and depth of impact.
+                    {' '}<em>Loads on demand for the top 30 entities.</em>
                   </>
                 );
               }
@@ -2085,6 +2228,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
                   status={tabConfig.data.status}
                   sortMode={sortMode}
                   topN={TOP_N}
+                  meanCitesMap={meanCitesByDim[dimensionTab]?.status === 'ready' ? meanCitesByDim[dimensionTab].data : null}
                 />
               </div>
               <div className="md:col-span-2">
@@ -2092,7 +2236,12 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
                   style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
                   className="uppercase mb-2"
                 >
-                  Top {TOP_N} by {sortMode === 'share' ? `percentage ${mode === 'cited' ? 'cited' : 'uncited'}` : 'extra count vs expected'}
+                  Top {TOP_N} by {
+                    sortMode === 'share'     ? `percentage ${mode === 'cited' ? 'cited' : 'uncited'}` :
+                    sortMode === 'excess'    ? 'extra count vs expected' :
+                    sortMode === 'meanCites' ? 'mean citations per work' :
+                    'rank'
+                  }
                 </div>
                 {renderList(tabConfig.data, tabConfig.min)}
               </div>
