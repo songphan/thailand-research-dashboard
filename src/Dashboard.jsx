@@ -848,7 +848,7 @@ const CitationReachBars = ({ series, year, status, error, onDrillDown }) => {
           }}
           className="uppercase"
         >
-          Tip · Click "{fmtFull(active.cited)} cited" or "{fmtFull(active.uncited)} uncited" to see top fields
+          Tip · Click "{fmtFull(active.cited)} cited" or "{fmtFull(active.uncited)} uncited" to see top fields, subfields, and institutions by within-entity share
         </div>
       )}
     </div>
@@ -1437,52 +1437,109 @@ const TableModal = ({
   );
 };
 
-// Drill-down modal showing top fields and subfields for the cited or uncited
-// subset of the active selection. Fetches happen when the modal opens and the
-// mode (cited/uncited) determines the additional filter clause. Each side shows
-// top 10. The modal closes on Esc or backdrop click.
-const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr }) => {
-  const [fields, setFields] = useState({ status: 'idle', data: [], total: 0 });
-  const [subfields, setSubfields] = useState({ status: 'idle', data: [], total: 0 });
+// Drill-down modal showing top fields, subfields, and institutions for the
+// cited or uncited subset of the active selection, ranked by within-entity SHARE
+// rather than raw count. For each entity (field / subfield / institution) we
+// fetch the subset count (numerator) and the full count (denominator), compute
+// the share, and apply a minimum-works threshold so tiny entities with 2-of-3
+// works cited don't dominate the rankings. The modal closes on Esc or backdrop click.
+const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr, countryInstitutionIds = [] }) => {
+  // Minimum works per entity to qualify for ranking. Below this, share percentages
+  // are too noisy to be meaningful (e.g. a field with 3 works at 100% cited).
+  const MIN_WORKS_FOR_FIELD = 30;
+  const MIN_WORKS_FOR_SUBFIELD = 15;
+  const MIN_WORKS_FOR_INSTITUTION = 20;
+  const TOP_N = 20;
+
+  const [fields, setFields] = useState({ status: 'idle', data: [] });
+  const [subfields, setSubfields] = useState({ status: 'idle', data: [] });
+  const [institutions, setInstitutions] = useState({ status: 'idle', data: [] });
 
   useEffect(() => {
     if (!open || !mode) return;
     let cancelled = false;
-    const citationClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
-    const filterStr = `${baseFilterStr},${citationClause}`;
-    setFields({ status: 'loading', data: [], total: 0 });
-    setSubfields({ status: 'loading', data: [], total: 0 });
+    const subsetClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
+    const subsetFilter = `${baseFilterStr},${subsetClause}`;
+    const totalFilter = baseFilterStr;
+    setFields({ status: 'loading', data: [] });
+    setSubfields({ status: 'loading', data: [] });
+    setInstitutions({ status: 'loading', data: [] });
 
-    const fetchTop = async (groupBy) => {
+    // Fetch a group_by and return a map of key → { count, label }.
+    const fetchGroupMap = async (filterStr, groupBy) => {
       const url = withMailto(
         `${OPENALEX_BASE}/works?filter=${filterStr}&group_by=${groupBy}&per-page=200`
       );
       const j = await fetchJson(url);
-      const groups = (j.group_by || [])
-        .filter((g) => g.key && g.key !== 'unknown')
-        .map((g) => ({ key: g.key, label: g.key_display_name, value: g.count }));
-      const totalAcrossGroups = groups.reduce((s, g) => s + g.value, 0);
-      return { groups, totalAcrossGroups };
+      const map = new Map();
+      for (const g of j.group_by || []) {
+        if (!g.key || g.key === 'unknown') continue;
+        map.set(g.key, { count: g.count, label: g.key_display_name });
+      }
+      return map;
+    };
+
+    // Build a sorted-by-share array from numerator and denominator maps.
+    // minWorks: only include entities whose denominator is at least this.
+    const buildShareList = (subsetMap, totalMap, minWorks) => {
+      const rows = [];
+      for (const [key, totalEntry] of totalMap.entries()) {
+        if (totalEntry.count < minWorks) continue;
+        const subsetCount = subsetMap.get(key)?.count || 0;
+        const share = subsetCount / totalEntry.count;
+        rows.push({
+          key,
+          label: totalEntry.label || subsetMap.get(key)?.label,
+          subset: subsetCount,
+          total: totalEntry.count,
+          share,
+        });
+      }
+      rows.sort((a, b) => b.share - a.share || b.total - a.total);
+      return rows.slice(0, TOP_N);
     };
 
     (async () => {
       try {
-        const [fRes, sRes] = await Promise.all([
-          fetchTop('primary_topic.field.id'),
-          fetchTop('primary_topic.subfield.id'),
+        // Six parallel fetches: subset and total for each of three dimensions.
+        const [
+          subsetFields, totalFields,
+          subsetSubfields, totalSubfields,
+          subsetInsts, totalInsts,
+        ] = await Promise.all([
+          fetchGroupMap(subsetFilter, 'primary_topic.field.id'),
+          fetchGroupMap(totalFilter,  'primary_topic.field.id'),
+          fetchGroupMap(subsetFilter, 'primary_topic.subfield.id'),
+          fetchGroupMap(totalFilter,  'primary_topic.subfield.id'),
+          fetchGroupMap(subsetFilter, 'authorships.institutions.id'),
+          fetchGroupMap(totalFilter,  'authorships.institutions.id'),
         ]);
         if (cancelled) return;
-        setFields({ status: 'ready', data: fRes.groups.slice(0, 10), total: fRes.totalAcrossGroups });
-        setSubfields({ status: 'ready', data: sRes.groups.slice(0, 10), total: sRes.totalAcrossGroups });
+
+        // Filter the institutions maps to the country roster so foreign
+        // collaborators don't dominate the rankings. The country roster comes
+        // from state.institutions.data (the Producing Institutions panel).
+        let filteredSubsetInsts = subsetInsts;
+        let filteredTotalInsts = totalInsts;
+        if (countryInstitutionIds && countryInstitutionIds.length > 0) {
+          const allowed = new Set(countryInstitutionIds);
+          filteredSubsetInsts = new Map([...subsetInsts].filter(([k]) => allowed.has(k)));
+          filteredTotalInsts  = new Map([...totalInsts].filter(([k]) => allowed.has(k)));
+        }
+
+        setFields({ status: 'ready', data: buildShareList(subsetFields, totalFields, MIN_WORKS_FOR_FIELD) });
+        setSubfields({ status: 'ready', data: buildShareList(subsetSubfields, totalSubfields, MIN_WORKS_FOR_SUBFIELD) });
+        setInstitutions({ status: 'ready', data: buildShareList(filteredSubsetInsts, filteredTotalInsts, MIN_WORKS_FOR_INSTITUTION) });
       } catch (e) {
         if (cancelled) return;
-        setFields({ status: 'error', data: [], total: 0, error: e.message });
-        setSubfields({ status: 'error', data: [], total: 0, error: e.message });
+        setFields({ status: 'error', data: [], error: e.message });
+        setSubfields({ status: 'error', data: [], error: e.message });
+        setInstitutions({ status: 'error', data: [], error: e.message });
       }
     })();
 
     return () => { cancelled = true; };
-  }, [open, mode, baseFilterStr]);
+  }, [open, mode, baseFilterStr, countryInstitutionIds]);
 
   useEffect(() => {
     if (!open) return;
@@ -1500,8 +1557,9 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr 
 
   const titleMode = mode === 'cited' ? 'cited at least once' : 'still uncited';
   const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
+  const shareLabel = mode === 'cited' ? '% cited' : '% uncited';
 
-  const renderList = ({ status, data, total }) => {
+  const renderList = ({ status, data }, minWorks) => {
     if (status === 'loading') {
       return (
         <div className="flex items-center gap-2 px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
@@ -1513,16 +1571,20 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr 
       return <div className="px-3 py-6" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>Could not load.</div>;
     }
     if (!data || data.length === 0) {
-      return <div className="px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>No data.</div>;
+      return (
+        <div className="px-3 py-6" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+          No entries with at least {minWorks} works in this subset.
+        </div>
+      );
     }
-    const max = data[0]?.value || 1;
     return (
       <ol className="space-y-1.5">
         {data.map((d, i) => {
-          const widthPct = (d.value / max) * 100;
-          const sharePct = pct(d.value, total);
+          // Bar width represents the share, full bar = 100%.
+          const widthPct = d.share * 100;
+          const sharePct = widthPct.toFixed(1) + '%';
           return (
-            <li key={d.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '24px 1fr 70px' }}>
+            <li key={d.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '24px 1fr 88px' }}>
               <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, textAlign: 'right' }}>{i + 1}</span>
               <div className="relative" style={{ height: 22, background: PALETTE.cream, borderRadius: 2 }}>
                 <div
@@ -1530,22 +1592,25 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr 
                     position: 'absolute', left: 0, top: 0, bottom: 0,
                     width: `${widthPct}%`,
                     background: accent,
-                    opacity: 0.18,
+                    opacity: 0.22,
                     borderRadius: 2,
                   }}
                 />
                 <span
-                  className="absolute inset-y-0 left-2 flex items-center"
-                  style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.ink }}
+                  className="absolute inset-y-0 left-2 right-2 flex items-center"
+                  style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.ink, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}
+                  title={d.label}
                 >
                   {d.label}
                 </span>
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
-                  {fmtFull(d.value)}
+                  {sharePct}
                 </div>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>{sharePct}</div>
+                <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>
+                  {fmtFull(d.subset)} / {fmtFull(d.total)}
+                </div>
               </div>
             </li>
           );
@@ -1561,7 +1626,7 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr 
       onClick={onClose}
     >
       <div
-        className="flex max-h-[88vh] w-full max-w-4xl flex-col rounded-md"
+        className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-md"
         style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.ink}` }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -1577,10 +1642,10 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr 
               style={{ fontFamily: FONT_DISPLAY, color: PALETTE.ink, fontSize: 22, fontWeight: 500, fontStyle: 'italic', lineHeight: 1.15 }}
               className="mt-0.5"
             >
-              Top fields and subfields for works {titleMode}
+              Top fields, subfields, and institutions by share of works {titleMode}
             </h3>
             <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }} className="mt-1">
-              {countryName(country)} · respects active filters · top 10 of each
+              {countryName(country)} · ranked by within-entity {shareLabel} · top {TOP_N} each · min thresholds prevent small-sample noise
             </div>
           </div>
           <button
@@ -1593,24 +1658,33 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr 
           </button>
         </header>
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
             <div>
               <div
                 style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
                 className="uppercase mb-2"
               >
-                Top fields
+                Fields · min {MIN_WORKS_FOR_FIELD} works
               </div>
-              {renderList(fields)}
+              {renderList(fields, MIN_WORKS_FOR_FIELD)}
             </div>
             <div>
               <div
                 style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
                 className="uppercase mb-2"
               >
-                Top subfields
+                Subfields · min {MIN_WORKS_FOR_SUBFIELD} works
               </div>
-              {renderList(subfields)}
+              {renderList(subfields, MIN_WORKS_FOR_SUBFIELD)}
+            </div>
+            <div>
+              <div
+                style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                className="uppercase mb-2"
+              >
+                Institutions · min {MIN_WORKS_FOR_INSTITUTION} works
+              </div>
+              {renderList(institutions, MIN_WORKS_FOR_INSTITUTION)}
             </div>
           </div>
         </div>
@@ -1619,7 +1693,7 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr 
           style={{ borderColor: PALETTE.rule, fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }}
         >
           <span className="uppercase">
-            Esc to close · Shares are of total field/subfield assignments in this subset
+            Esc to close · Share = subset / total within each entity · Right column shows raw subset/total
           </span>
         </footer>
       </div>
@@ -3453,6 +3527,7 @@ export default function ResearchOutputDashboard() {
         year={year}
         country={country}
         baseFilterStr={filterStrings.all}
+        countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
       />
     </div>
   );
