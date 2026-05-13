@@ -320,7 +320,32 @@ async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
       if (res.status === 409) {
         throw new Error('HTTP 409 — OpenAlex API key required or daily credits exhausted. See OPENALEX_API_KEY at the top of Dashboard.jsx.');
       }
-      // Retry on transient failures: 429 (rate limit), 502/503/504 (gateway/timeout).
+      // OpenAlex returns 429 for TWO different conditions, distinguishable by the
+      // response body. We need to inspect the body to tell them apart, because the
+      // correct behaviour differs: rate-limit retries; budget-exhausted does not.
+      //   - true rate limit (too many requests per second): retry with backoff
+      //   - daily budget exhausted: don't retry. Surface a clear "out of budget"
+      //     message that tells the user when it resets and where to add funds.
+      // The body has shape: { error, message, retryAfter, dailyRemainingUsd, ... }
+      if (res.status === 429) {
+        let body = null;
+        try { body = await res.clone().json(); } catch { /* not JSON */ }
+        const isBudgetError =
+          body && (
+            body.dailyRemainingUsd === 0 ||
+            body.creditsRemaining === 0 ||
+            (typeof body.message === 'string' && /Insufficient budget/i.test(body.message))
+          );
+        if (isBudgetError) {
+          const retryHours = body.retryAfter ? Math.ceil(body.retryAfter / 3600) : null;
+          const whenMsg = retryHours
+            ? ` Quota resets at midnight UTC (in about ${retryHours} hour${retryHours === 1 ? '' : 's'}).`
+            : ' Quota resets at midnight UTC.';
+          throw new Error(`OpenAlex daily quota exhausted.${whenMsg} See https://openalex.org/pricing to add funds, or wait for the daily reset.`);
+        }
+        // Otherwise it's a true rate-limit 429: retry with backoff.
+      }
+      // Retry on transient failures: 429 (genuine rate limit), 502/503/504 (gateway/timeout).
       // Use exponential backoff with jitter. With the rate limiter in place, 429s
       // should be rare; this is a second line of defence.
       const isTransient = res.status === 429 || res.status >= 502;
