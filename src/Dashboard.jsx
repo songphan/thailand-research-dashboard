@@ -235,51 +235,81 @@ const buildFilterString = (country, yearOrYears, filters, excludeDim = null) => 
   return parts.join(',');
 };
 
-// Concurrency-limited request gate. OpenAlex's rate limit is 10 requests per
-// second; the dashboard can easily fire 30-40 in the first second on a fresh
-// load (panels, citation insight, prior-year comparisons, mean-cites lazy
-// fetches). Without a gate they all hit at once, hit the rate limit, get 429,
-// retry simultaneously, and hit it again. The gate caps concurrent in-flight
-// requests at MAX_CONCURRENT, queueing the rest. Combined with the existing
-// 429 retry logic, this turns bursts into smooth-feeding sequences.
+// Request rate limiter. OpenAlex caps at 10 requests per second. A pure
+// concurrency cap doesn't help here: if responses take ~280ms, 6 concurrent
+// slots = ~21 req/sec, well over the ceiling. We need a rate-based gate that
+// enforces "no more than N requests within any rolling 1-second window."
 //
-// MAX_CONCURRENT=6 leaves headroom under the 10/sec ceiling for retries and
-// network jitter. Increasing this risks 429s; decreasing it slows page loads
-// unnecessarily.
-const MAX_CONCURRENT_REQUESTS = 6;
-let inflightCount = 0;
-const pendingQueue = [];
-function acquireRequestSlot() {
-  return new Promise((resolve) => {
-    if (inflightCount < MAX_CONCURRENT_REQUESTS) {
-      inflightCount++;
-      resolve();
-    } else {
-      pendingQueue.push(resolve);
-    }
-  });
-}
-function releaseRequestSlot() {
-  const next = pendingQueue.shift();
-  if (next) {
-    // Hand the slot directly to the next queued request without decrementing
-    // and re-incrementing the counter; this keeps the invariant tight under
-    // contention.
-    next();
-  } else {
-    inflightCount--;
+// Implementation: keep timestamps of recent send-times. Before each new request,
+// drop timestamps older than 1 second and check whether we have room under the
+// rate cap. If not, wait until the oldest timestamp ages out, then check again.
+//
+// RATE_PER_SECOND is set comfortably below OpenAlex's 10/sec ceiling to absorb
+// retries and any timing variance. Lower means safer; higher means faster.
+const RATE_PER_SECOND = 7;
+const RATE_WINDOW_MS = 1000;
+const sendTimestamps = [];
+const pendingRateQueue = [];
+let drainScheduled = false;
+
+function pruneTimestamps(now) {
+  const cutoff = now - RATE_WINDOW_MS;
+  while (sendTimestamps.length > 0 && sendTimestamps[0] <= cutoff) {
+    sendTimestamps.shift();
   }
 }
 
+function scheduleDrain() {
+  if (drainScheduled || pendingRateQueue.length === 0) return;
+  drainScheduled = true;
+  // How long until the oldest in-window timestamp falls out of the window?
+  const now = Date.now();
+  pruneTimestamps(now);
+  let delay = 0;
+  if (sendTimestamps.length >= RATE_PER_SECOND) {
+    const oldest = sendTimestamps[0];
+    delay = Math.max(0, oldest + RATE_WINDOW_MS - now) + 5; // 5ms margin
+  }
+  setTimeout(() => {
+    drainScheduled = false;
+    drainQueue();
+  }, delay);
+}
+
+function drainQueue() {
+  const now = Date.now();
+  pruneTimestamps(now);
+  // Hand out as many slots as we have headroom for.
+  while (sendTimestamps.length < RATE_PER_SECOND && pendingRateQueue.length > 0) {
+    const resolve = pendingRateQueue.shift();
+    sendTimestamps.push(Date.now());
+    resolve();
+  }
+  if (pendingRateQueue.length > 0) scheduleDrain();
+}
+
+function acquireRequestSlot() {
+  return new Promise((resolve) => {
+    const now = Date.now();
+    pruneTimestamps(now);
+    if (sendTimestamps.length < RATE_PER_SECOND && pendingRateQueue.length === 0) {
+      sendTimestamps.push(now);
+      resolve();
+    } else {
+      pendingRateQueue.push(resolve);
+      scheduleDrain();
+    }
+  });
+}
+
+// No explicit release: the rate limiter is fire-and-forget. Once a request is
+// counted in sendTimestamps, it ages out of the window automatically after
+// RATE_WINDOW_MS. This is simpler and more correct than tracking in-flight
+// counts, since OpenAlex's limit is rate-based, not concurrency-based.
+function releaseRequestSlot() { /* no-op; retained for symmetry */ }
+
 async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
   await acquireRequestSlot();
-  let slotReleased = false;
-  const release = () => {
-    if (!slotReleased) {
-      slotReleased = true;
-      releaseRequestSlot();
-    }
-  };
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -291,20 +321,17 @@ async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
         throw new Error('HTTP 409 — OpenAlex API key required or daily credits exhausted. See OPENALEX_API_KEY at the top of Dashboard.jsx.');
       }
       // Retry on transient failures: 429 (rate limit), 502/503/504 (gateway/timeout).
-      // Use exponential backoff with jitter. With the request gate in place, 429s
+      // Use exponential backoff with jitter. With the rate limiter in place, 429s
       // should be rare; this is a second line of defence.
       const isTransient = res.status === 429 || res.status >= 502;
       const maxAttempts = res.status === 429 ? 4 : 2;
       if (isTransient && attempt < maxAttempts) {
         clearTimeout(t);
-        // Release the slot before sleeping so queued requests can proceed.
-        // The retry will re-acquire when it's ready to fire again.
-        release();
         // 800ms, 1.6s, 3.2s, 6.4s base + 0-600ms jitter
         const base = 800 * Math.pow(2, attempt);
         const wait = base + Math.random() * 600;
         await new Promise((r) => setTimeout(r, wait));
-        // Re-enter fetchJson which will acquire a fresh slot.
+        // Retry re-enters the limiter (no slot to release; timestamps age out).
         return fetchJson(url, timeoutMs, attempt + 1);
       }
       throw new Error(`HTTP ${res.status} ${res.statusText || ''}`.trim());
@@ -312,8 +339,6 @@ async function fetchJson(url, timeoutMs = 25000, attempt = 0) {
     return await res.json();
   } finally {
     clearTimeout(t);
-    // release() is a no-op if the retry path already released.
-    release();
   }
 }
 
