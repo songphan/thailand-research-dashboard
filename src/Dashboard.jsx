@@ -1430,21 +1430,26 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
   const muted = '#c9c0ad'; // a touch lighter than rule, for non-top dots
   const [hover, setHover] = React.useState(null);
 
+  // Decorate rows with meanCites when available; for meanCites sort, drop rows
+  // without a cached value so the scatter only shows entities we actually ranked.
+  const decoratedRows = React.useMemo(() => {
+    if (sortMode === 'meanCites' && meanCitesMap) {
+      return (rows || [])
+        .map((r) => ({ ...r, meanCites: meanCitesMap.get(r.key) }))
+        .filter((r) => r.meanCites != null);
+    }
+    return rows || [];
+  }, [rows, sortMode, meanCitesMap]);
+
   // Compute top-N keys to highlight, mirroring the sort logic from renderList.
   const topKeys = React.useMemo(() => {
-    let decorated = rows || [];
-    if (sortMode === 'meanCites' && meanCitesMap) {
-      decorated = decorated
-        .map((r) => ({ ...r, meanCites: meanCitesMap.get(r.key) }))
-        .filter((r) => r.meanCites !== undefined && r.meanCites !== null);
-    }
-    const sorted = [...decorated].sort((a, b) => {
+    const sorted = [...decoratedRows].sort((a, b) => {
       if (sortMode === 'excess') return b.excess - a.excess;
       if (sortMode === 'meanCites') return (b.meanCites || 0) - (a.meanCites || 0);
       return b.share - a.share || b.total - a.total;
     });
     return new Set(sorted.slice(0, topN).map((d) => d.key));
-  }, [rows, sortMode, topN, meanCitesMap]);
+  }, [decoratedRows, sortMode, topN]);
 
   if (status === 'loading') {
     return (
@@ -1468,29 +1473,90 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
       </div>
     );
   }
+  // Mean-cites sort but cache not loaded yet (or all empty): show a hint.
+  if (sortMode === 'meanCites' && decoratedRows.length === 0) {
+    return (
+      <div className="flex h-[320px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+        <Loader2 size={14} className="animate-spin" />
+        <span className="ml-2">Computing mean cites/work for the scatter…</span>
+      </div>
+    );
+  }
 
-  // Build axes from the data range.
-  const totals = rows.map((d) => d.total);
+  // Build x-axis from total works (log scale, common to both modes).
+  const totals = decoratedRows.map((d) => d.total);
   const minTotal = Math.max(minWorks, Math.min(...totals));
   const maxTotal = Math.max(...totals);
-  // Log scale on x. Guard against minTotal === maxTotal.
-  const logMin = Math.log10(minTotal);
-  const logMax = Math.log10(maxTotal);
-  const xRange = Math.max(0.0001, logMax - logMin);
-  const xFor = (v) => PAD.left + ((Math.log10(v) - logMin) / xRange) * plotW;
-  // Linear y: share runs 0..1
-  const yFor = (s) => PAD.top + (1 - s) * plotH;
+  const xLogMin = Math.log10(minTotal);
+  const xLogMax = Math.log10(maxTotal);
+  const xRange = Math.max(0.0001, xLogMax - xLogMin);
+  const xFor = (v) => PAD.left + ((Math.log10(v) - xLogMin) / xRange) * plotW;
+
+  // Y-axis depends on sort mode.
+  //   share/excess modes: linear y, share runs 0..1
+  //   meanCites mode: log y, range derived from the meanCites values present
+  const isMeanCitesAxis = sortMode === 'meanCites' && meanCitesMap;
+  let yFor, yTicks, refLineY, refLineLabel;
+  if (isMeanCitesAxis) {
+    // Log scale on mean cites. Clamp the floor to 0.5 so a true zero doesn't
+    // blow up the log, and pad the ceiling slightly so dots aren't on the edge.
+    const means = decoratedRows.map((d) => Math.max(0.5, d.meanCites || 0.5));
+    const yLogMin = Math.log10(Math.min(...means, 0.5));
+    const yLogMax = Math.log10(Math.max(...means, 1));
+    const yLogPaddedMin = Math.floor(yLogMin);
+    const yLogPaddedMax = Math.ceil(yLogMax + 0.05);
+    const yLogRange = Math.max(0.5, yLogPaddedMax - yLogPaddedMin);
+    yFor = (v) => {
+      const safe = Math.max(0.5, v);
+      return PAD.top + (1 - (Math.log10(safe) - yLogPaddedMin) / yLogRange) * plotH;
+    };
+    // Country-wide mean cites: weighted average of meanCites by total works,
+    // computed across all entities the user has cached.
+    let weightedSum = 0;
+    let weightDenom = 0;
+    for (const d of decoratedRows) {
+      if (d.meanCites != null) {
+        weightedSum += d.meanCites * d.total;
+        weightDenom += d.total;
+      }
+    }
+    const meanOfMeans = weightDenom > 0 ? weightedSum / weightDenom : null;
+    if (meanOfMeans != null && meanOfMeans > 0) {
+      refLineY = yFor(meanOfMeans);
+      refLineLabel = `Country avg ${meanOfMeans.toFixed(1)} cites/work`;
+    }
+    // Ticks at every power of 10 within range.
+    yTicks = [];
+    for (let p = yLogPaddedMin; p <= yLogPaddedMax; p++) {
+      yTicks.push(Math.pow(10, p));
+    }
+  } else {
+    yFor = (s) => PAD.top + (1 - s) * plotH;
+    yTicks = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    if (globalRate > 0 && globalRate < 1) {
+      refLineY = yFor(globalRate);
+      refLineLabel = `Country rate ${(globalRate * 100).toFixed(1)}%`;
+    }
+  }
 
   // X-axis log gridlines at powers of 10 within range.
   const xTicks = [];
-  for (let p = Math.floor(logMin); p <= Math.ceil(logMax); p++) {
+  for (let p = Math.floor(xLogMin); p <= Math.ceil(xLogMax); p++) {
     const v = Math.pow(10, p);
     if (v < minTotal * 0.95) continue;
     if (v > maxTotal * 1.05) continue;
     xTicks.push({ v, x: xFor(v) });
   }
-  // Y-axis gridlines at every 20%
-  const yTicks = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+
+  // Y-axis tick formatter
+  const fmtYTick = (v) => {
+    if (isMeanCitesAxis) {
+      return v >= 1 ? (v >= 1000 ? `${v / 1000}k` : v.toString()) : v.toFixed(1);
+    }
+    return `${(v * 100).toFixed(0)}%`;
+  };
+  // Position to plot a dot on the y-axis depending on mode.
+  const dotY = (d) => isMeanCitesAxis ? yFor(d.meanCites) : yFor(d.share);
 
   return (
     <div className="relative" style={{ width: '100%' }}>
@@ -1509,27 +1575,27 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
               textAnchor="end"
               style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}
             >
-              {(y * 100).toFixed(0)}%
+              {fmtYTick(y)}
             </text>
           </g>
         ))}
-        {/* Global rate reference line */}
-        {globalRate > 0 && globalRate < 1 && (
+        {/* Reference line: country-wide share or country-wide mean cites */}
+        {refLineY != null && (
           <g>
             <line
               x1={PAD.left} x2={W - PAD.right}
-              y1={yFor(globalRate)} y2={yFor(globalRate)}
+              y1={refLineY} y2={refLineY}
               stroke={accent}
               strokeWidth="1.2"
               strokeDasharray="4 3"
               opacity="0.7"
             />
             <text
-              x={W - PAD.right - 6} y={yFor(globalRate) - 4}
+              x={W - PAD.right - 6} y={refLineY - 4}
               textAnchor="end"
               style={{ fontFamily: FONT_MONO, fontSize: 9, fill: accent, fontWeight: 500 }}
             >
-              Country rate {(globalRate * 100).toFixed(1)}%
+              {refLineLabel}
             </text>
           </g>
         )}
@@ -1565,13 +1631,15 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
           transform={`rotate(-90, 14, ${PAD.top + plotH / 2})`}
           style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
         >
-          {mode === 'cited' ? '% CITED' : '% UNCITED'}
+          {isMeanCitesAxis
+            ? 'MEAN CITES/WORK (LOG)'
+            : (mode === 'cited' ? '% CITED' : '% UNCITED')}
         </text>
         {/* Dots: non-top first so top sit on top */}
-        {rows.filter((d) => !topKeys.has(d.key)).map((d) => (
+        {decoratedRows.filter((d) => !topKeys.has(d.key)).map((d) => (
           <circle
             key={d.key}
-            cx={xFor(d.total)} cy={yFor(d.share)}
+            cx={xFor(d.total)} cy={dotY(d)}
             r="3.5"
             fill={muted}
             opacity="0.55"
@@ -1580,10 +1648,10 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
             style={{ cursor: 'pointer' }}
           />
         ))}
-        {rows.filter((d) => topKeys.has(d.key)).map((d) => (
+        {decoratedRows.filter((d) => topKeys.has(d.key)).map((d) => (
           <circle
             key={d.key}
-            cx={xFor(d.total)} cy={yFor(d.share)}
+            cx={xFor(d.total)} cy={dotY(d)}
             r="5"
             fill={accent}
             stroke={PALETTE.paper}
