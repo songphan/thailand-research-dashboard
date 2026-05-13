@@ -1443,6 +1443,211 @@ const TableModal = ({
   );
 };
 
+// Pure-SVG scatter plot of total works (log x) vs cited (or uncited) share (linear y).
+// Each dot is one entity (field, subfield, or institution). The dots that would
+// appear in the top-N ranking are drawn in the accent colour; everything else is
+// muted grey. A dashed horizontal reference line at the global rate makes the
+// "above/below expected" interpretation visible at a glance. Hovering a dot shows
+// its label and counts in a small tooltip.
+const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMode, topN }) => {
+  const W = 560;
+  const H = 320;
+  const PAD = { top: 14, right: 20, bottom: 36, left: 44 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+  const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
+  const muted = '#c9c0ad'; // a touch lighter than rule, for non-top dots
+  const [hover, setHover] = React.useState(null);
+
+  // Compute top-N keys to highlight, mirroring the sort logic from renderList.
+  const topKeys = React.useMemo(() => {
+    const sorted = [...(rows || [])].sort((a, b) => {
+      if (sortMode === 'excess') return b.excess - a.excess;
+      return b.share - a.share || b.total - a.total;
+    });
+    return new Set(sorted.slice(0, topN).map((d) => d.key));
+  }, [rows, sortMode, topN]);
+
+  if (status === 'loading') {
+    return (
+      <div className="flex h-[320px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+        <Loader2 size={14} className="animate-spin" />
+        <span className="ml-2">Loading scatter…</span>
+      </div>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <div className="flex h-[320px] items-center justify-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
+        Could not load.
+      </div>
+    );
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <div className="flex h-[320px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+        No entries with at least {minWorks} works.
+      </div>
+    );
+  }
+
+  // Build axes from the data range.
+  const totals = rows.map((d) => d.total);
+  const minTotal = Math.max(minWorks, Math.min(...totals));
+  const maxTotal = Math.max(...totals);
+  // Log scale on x. Guard against minTotal === maxTotal.
+  const logMin = Math.log10(minTotal);
+  const logMax = Math.log10(maxTotal);
+  const xRange = Math.max(0.0001, logMax - logMin);
+  const xFor = (v) => PAD.left + ((Math.log10(v) - logMin) / xRange) * plotW;
+  // Linear y: share runs 0..1
+  const yFor = (s) => PAD.top + (1 - s) * plotH;
+
+  // X-axis log gridlines at powers of 10 within range.
+  const xTicks = [];
+  for (let p = Math.floor(logMin); p <= Math.ceil(logMax); p++) {
+    const v = Math.pow(10, p);
+    if (v < minTotal * 0.95) continue;
+    if (v > maxTotal * 1.05) continue;
+    xTicks.push({ v, x: xFor(v) });
+  }
+  // Y-axis gridlines at every 20%
+  const yTicks = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+
+  return (
+    <div className="relative" style={{ width: '100%', maxWidth: W }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+        {/* Y gridlines + labels */}
+        {yTicks.map((y) => (
+          <g key={`y-${y}`}>
+            <line
+              x1={PAD.left} x2={W - PAD.right}
+              y1={yFor(y)} y2={yFor(y)}
+              stroke={PALETTE.rule}
+              strokeDasharray="2 4"
+            />
+            <text
+              x={PAD.left - 6} y={yFor(y) + 3}
+              textAnchor="end"
+              style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}
+            >
+              {(y * 100).toFixed(0)}%
+            </text>
+          </g>
+        ))}
+        {/* Global rate reference line */}
+        {globalRate > 0 && globalRate < 1 && (
+          <g>
+            <line
+              x1={PAD.left} x2={W - PAD.right}
+              y1={yFor(globalRate)} y2={yFor(globalRate)}
+              stroke={accent}
+              strokeWidth="1.2"
+              strokeDasharray="4 3"
+              opacity="0.7"
+            />
+            <text
+              x={W - PAD.right - 6} y={yFor(globalRate) - 4}
+              textAnchor="end"
+              style={{ fontFamily: FONT_MONO, fontSize: 9, fill: accent, fontWeight: 500 }}
+            >
+              Country rate {(globalRate * 100).toFixed(1)}%
+            </text>
+          </g>
+        )}
+        {/* X gridlines + labels */}
+        {xTicks.map((t) => (
+          <g key={`x-${t.v}`}>
+            <line
+              x1={t.x} x2={t.x}
+              y1={PAD.top} y2={H - PAD.bottom}
+              stroke={PALETTE.rule}
+              strokeDasharray="2 4"
+            />
+            <text
+              x={t.x} y={H - PAD.bottom + 14}
+              textAnchor="middle"
+              style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}
+            >
+              {t.v >= 1000 ? `${t.v / 1000}k` : t.v.toString()}
+            </text>
+          </g>
+        ))}
+        {/* Axis titles */}
+        <text
+          x={PAD.left + plotW / 2} y={H - 4}
+          textAnchor="middle"
+          style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
+        >
+          TOTAL WORKS (LOG)
+        </text>
+        <text
+          x={14} y={PAD.top + plotH / 2}
+          textAnchor="middle"
+          transform={`rotate(-90, 14, ${PAD.top + plotH / 2})`}
+          style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
+        >
+          {mode === 'cited' ? '% CITED' : '% UNCITED'}
+        </text>
+        {/* Dots: non-top first so top sit on top */}
+        {rows.filter((d) => !topKeys.has(d.key)).map((d) => (
+          <circle
+            key={d.key}
+            cx={xFor(d.total)} cy={yFor(d.share)}
+            r="3.5"
+            fill={muted}
+            opacity="0.55"
+            onMouseEnter={() => setHover(d)}
+            onMouseLeave={() => setHover(null)}
+            style={{ cursor: 'pointer' }}
+          />
+        ))}
+        {rows.filter((d) => topKeys.has(d.key)).map((d) => (
+          <circle
+            key={d.key}
+            cx={xFor(d.total)} cy={yFor(d.share)}
+            r="5"
+            fill={accent}
+            stroke={PALETTE.paper}
+            strokeWidth="1.4"
+            onMouseEnter={() => setHover(d)}
+            onMouseLeave={() => setHover(null)}
+            style={{ cursor: 'pointer' }}
+          />
+        ))}
+      </svg>
+      {/* Tooltip */}
+      {hover && (
+        <div
+          className="pointer-events-none absolute rounded-sm px-2.5 py-1.5"
+          style={{
+            background: PALETTE.ink,
+            color: PALETTE.cream,
+            fontFamily: FONT_BODY,
+            fontSize: 11.5,
+            lineHeight: 1.3,
+            border: `1px solid ${PALETTE.ink}`,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+            left: `${((xFor(hover.total) + 12) / W) * 100}%`,
+            top: `${((yFor(hover.share) - 6) / H) * 100}%`,
+            maxWidth: 240,
+            whiteSpace: 'nowrap',
+            transform: 'translateY(-100%)',
+          }}
+        >
+          <div style={{ fontWeight: 500, whiteSpace: 'normal' }}>{hover.label}</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, opacity: 0.85, marginTop: 2 }}>
+            {(hover.share * 100).toFixed(1)}% · {fmtFull(hover.subset)} / {fmtFull(hover.total)}
+            {hover.excess !== undefined && (
+              <span> · {hover.excess >= 0 ? '+' : ''}{Math.round(hover.excess).toLocaleString()} excess</span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Drill-down modal showing top fields, subfields, and institutions for the
 // cited or uncited subset of the active selection, ranked by within-entity SHARE
 // rather than raw count. For each entity (field / subfield / institution) we
@@ -1464,6 +1669,9 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
   // Sort mode for the ranking. 'share' = ranked by share within entity (precision view);
   // 'excess' = ranked by subset minus expected based on global rate (volume-aware view).
   const [sortMode, setSortMode] = useState('share');
+  // Which dimension's scatter and ranking are shown. One at a time to keep the
+  // modal focused; users switch via the tab row.
+  const [dimensionTab, setDimensionTab] = useState('fields');
 
   useEffect(() => {
     if (!open || !mode) return;
@@ -1689,7 +1897,7 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
               Top fields, subfields, and institutions for works {titleMode}
             </h3>
             <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }} className="mt-1">
-              {countryName(country)} · top {TOP_N} each · min thresholds prevent small-sample noise
+              {countryName(country)} · pick a dimension below · scatter shows the distribution, list shows top {TOP_N}
             </div>
           </div>
           <button
@@ -1751,42 +1959,84 @@ const CitationDrillModal = ({ open, onClose, mode, year, country, baseFilterStr,
           </span>
         </div>
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-            <div>
-              <div
-                style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
-                className="uppercase mb-2"
-              >
-                Fields · min {MIN_WORKS_FOR_FIELD} works
-              </div>
-              {renderList(fields, MIN_WORKS_FOR_FIELD)}
-            </div>
-            <div>
-              <div
-                style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
-                className="uppercase mb-2"
-              >
-                Subfields · min {MIN_WORKS_FOR_SUBFIELD} works
-              </div>
-              {renderList(subfields, MIN_WORKS_FOR_SUBFIELD)}
-            </div>
-            <div>
-              <div
-                style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
-                className="uppercase mb-2"
-              >
-                Institutions · min {MIN_WORKS_FOR_INSTITUTION} works
-              </div>
-              {renderList(institutions, MIN_WORKS_FOR_INSTITUTION)}
-            </div>
+          {/* Dimension tabs: one of Fields / Subfields / Institutions is active. */}
+          <div className="mb-3 flex flex-wrap items-center gap-1.5">
+            {[
+              { key: 'fields',       label: 'Fields',       data: fields,       min: MIN_WORKS_FOR_FIELD },
+              { key: 'subfields',    label: 'Subfields',    data: subfields,    min: MIN_WORKS_FOR_SUBFIELD },
+              { key: 'institutions', label: 'Institutions', data: institutions, min: MIN_WORKS_FOR_INSTITUTION },
+            ].map((tab) => {
+              const isActive = dimensionTab === tab.key;
+              const n = tab.data.rows?.length || 0;
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => setDimensionTab(tab.key)}
+                  className="rounded-sm px-2.5 py-1 transition-colors"
+                  style={{
+                    border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
+                    background: isActive ? PALETTE.ink : 'transparent',
+                    color: isActive ? PALETTE.cream : PALETTE.charcoal,
+                    fontFamily: FONT_MONO,
+                    fontSize: 11,
+                    letterSpacing: '0.04em',
+                  }}
+                >
+                  {tab.label}
+                  <span style={{ marginLeft: 6, opacity: 0.7 }}>
+                    ({n}+ qualifying · min {tab.min})
+                  </span>
+                </button>
+              );
+            })}
           </div>
+
+          {/* Active tab body: scatter on the left, ranked list on the right.
+              On narrow screens they stack. */}
+          {(() => {
+            const tabConfig = {
+              fields:       { data: fields,       min: MIN_WORKS_FOR_FIELD,       singular: 'field' },
+              subfields:    { data: subfields,    min: MIN_WORKS_FOR_SUBFIELD,    singular: 'subfield' },
+              institutions: { data: institutions, min: MIN_WORKS_FOR_INSTITUTION, singular: 'institution' },
+            }[dimensionTab];
+            return (
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-5">
+                <div className="md:col-span-3">
+                  <div
+                    style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                    className="uppercase mb-2"
+                  >
+                    Distribution · each dot is one {tabConfig.singular}
+                  </div>
+                  <CitationReachScatter
+                    rows={tabConfig.data.rows || []}
+                    globalRate={tabConfig.data.globalRate || 0}
+                    mode={mode}
+                    minWorks={tabConfig.min}
+                    status={tabConfig.data.status}
+                    sortMode={sortMode}
+                    topN={TOP_N}
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <div
+                    style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }}
+                    className="uppercase mb-2"
+                  >
+                    Top {TOP_N} by {sortMode === 'share' ? shareLabel : 'excess'}
+                  </div>
+                  {renderList(tabConfig.data, tabConfig.min)}
+                </div>
+              </div>
+            );
+          })()}
         </div>
         <footer
           className="border-t px-5 py-3"
           style={{ borderColor: PALETTE.rule, fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }}
         >
           <span className="uppercase">
-            Esc to close · Share = subset / total within each entity · Right column shows raw subset/total
+            Esc to close · Highlighted dots are the top {TOP_N} in current ranking · Dashed line is the country-wide rate
           </span>
         </footer>
       </div>
