@@ -650,6 +650,175 @@ const InstPill = ({ active, onClick, label, subtle = false, color = null }) => {
   );
 };
 
+// Two stacked horizontal bars showing cited vs uncited share for the current
+// year and the prior year. Uses the dashboard's palette: rust for cited (strong
+// signal), cream/charcoal for uncited (recessive). Numbers and percentages render
+// inside each segment when there's room; otherwise they sit beside the bar.
+const CitationReachBars = ({ currentCited, currentUncited, prevCited, prevUncited, year, status, error }) => {
+  if (status === 'error') {
+    return (
+      <div style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-3">
+        Could not load citation reach: {error || 'unknown error'}
+      </div>
+    );
+  }
+  const rows = [];
+  const curTotal = (currentCited || 0) + (currentUncited || 0);
+  if (curTotal > 0) {
+    rows.push({
+      label: String(year),
+      cited: currentCited || 0,
+      uncited: currentUncited || 0,
+      total: curTotal,
+      emphasis: true,
+    });
+  }
+  const prevTotal = (prevCited || 0) + (prevUncited || 0);
+  if (prevTotal > 0) {
+    rows.push({
+      label: String(year - 1),
+      cited: prevCited || 0,
+      uncited: prevUncited || 0,
+      total: prevTotal,
+      emphasis: false,
+    });
+  }
+  if (rows.length === 0) {
+    return (
+      <div style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }} className="px-3 py-6">
+        {status === 'loading' ? 'Loading citation reach…' : 'No works in current selection.'}
+      </div>
+    );
+  }
+
+  // Compare cited share between current and previous year (when both present).
+  const sharesDelta = rows.length === 2
+    ? ((rows[0].cited / rows[0].total) - (rows[1].cited / rows[1].total)) * 100
+    : null;
+
+  return (
+    <div className="space-y-3">
+      {rows.map((r) => {
+        const citedPct = r.cited / r.total;
+        const uncitedPct = r.uncited / r.total;
+        const citedPctStr = (citedPct * 100).toFixed(1) + '%';
+        const uncitedPctStr = (uncitedPct * 100).toFixed(1) + '%';
+        const showCitedInline = citedPct > 0.18;
+        const showUncitedInline = uncitedPct > 0.18;
+        return (
+          <div key={r.label}>
+            <div className="flex items-baseline justify-between">
+              <div className="flex items-baseline gap-3">
+                <span
+                  style={{
+                    fontFamily: FONT_DISPLAY, fontStyle: 'italic',
+                    fontSize: r.emphasis ? 22 : 16,
+                    fontWeight: 500,
+                    color: r.emphasis ? PALETTE.ink : PALETTE.charcoal,
+                    lineHeight: 1,
+                  }}
+                >
+                  {r.label}
+                </span>
+                <span
+                  style={{
+                    fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted,
+                    letterSpacing: '0.04em',
+                  }}
+                >
+                  {fmtFull(r.total)} works
+                </span>
+              </div>
+              <span
+                style={{
+                  fontFamily: FONT_MONO, fontSize: 11, color: r.emphasis ? PALETTE.ink : PALETTE.muted,
+                  letterSpacing: '0.04em', fontWeight: r.emphasis ? 500 : 400,
+                }}
+              >
+                {citedPctStr} cited
+              </span>
+            </div>
+            <div
+              className="mt-1.5 flex w-full overflow-hidden"
+              style={{
+                height: r.emphasis ? 30 : 22,
+                borderRadius: 2,
+                border: `1px solid ${PALETTE.rule}`,
+              }}
+              role="img"
+              aria-label={`${r.label}: ${fmtFull(r.cited)} cited (${citedPctStr}), ${fmtFull(r.uncited)} uncited (${uncitedPctStr}).`}
+            >
+              <div
+                style={{
+                  width: `${citedPct * 100}%`,
+                  background: PALETTE.rust,
+                  color: PALETTE.cream,
+                  fontFamily: FONT_MONO,
+                  fontSize: 11,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-start',
+                  paddingLeft: 8,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                }}
+                title={`Cited: ${fmtFull(r.cited)} (${citedPctStr})`}
+              >
+                {showCitedInline && `${fmtFull(r.cited)} cited`}
+              </div>
+              <div
+                style={{
+                  width: `${uncitedPct * 100}%`,
+                  background: PALETTE.cream,
+                  color: PALETTE.charcoal,
+                  fontFamily: FONT_MONO,
+                  fontSize: 11,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-end',
+                  paddingRight: 8,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  transition: 'width 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)',
+                }}
+                title={`Uncited: ${fmtFull(r.uncited)} (${uncitedPctStr})`}
+              >
+                {showUncitedInline && `${fmtFull(r.uncited)} uncited`}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+      {sharesDelta !== null && (
+        <div
+          className="mt-2 flex items-center gap-2 rounded-sm px-3 py-2"
+          style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
+        >
+          <span
+            style={{
+              fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted,
+            }}
+            className="uppercase"
+          >
+            Year over year
+          </span>
+          <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+            Cited share in {year} is{' '}
+            <strong style={{ color: sharesDelta >= 0 ? PALETTE.forest : PALETTE.burgundy }}>
+              {sharesDelta >= 0 ? '↑' : '↓'} {Math.abs(sharesDelta).toFixed(1)} pp
+            </strong>{' '}
+            vs {year - 1}.{' '}
+            <span style={{ color: PALETTE.muted, fontSize: 11.5 }}>
+              Some of this gap reflects the citation lag for the most recent year and will close as the corpus ages.
+            </span>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const StatCard = ({ kicker, value, sub, accent, loading }) => (
   <Card className="p-5">
     <div
@@ -1983,6 +2152,42 @@ export default function ResearchOutputDashboard() {
       return { totalRefs, totalWorks, worksWithRefs };
     });
 
+    // Incoming citations: same trick as outgoing, but on cited_by_count instead of
+    // referenced_works_count. The distribution gives us {key: <citation count>, count:
+    // <number of works with that many cites>}; we sum (key * count) to get total cites
+    // received by the active selection. Average = total / totalWorks.
+    run('incomingCites', groupUrl(filterStrings.all, 'cited_by_count'), (j) => {
+      const groups = j?.group_by || [];
+      let totalCites = 0;
+      let totalWorks = 0;
+      let citedWorks = 0;
+      for (const g of groups) {
+        const c = Number(g.key) || 0;
+        const w = g.count || 0;
+        totalCites += c * w;
+        totalWorks += w;
+        if (c > 0) citedWorks += w;
+      }
+      return { totalCites, totalWorks, citedWorks };
+    });
+
+    // Cited vs uncited share for the active year. Cheap: two count requests.
+    run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
+    run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
+
+    // Same split but for the previous year, so we can show YoY comparison in the
+    // visibility-overview card. We swap publication_year in the filter string while
+    // keeping every other clause (country, chip filters, synthetic institution filter).
+    if (year > 2000) {
+      const prevYearAll = filterStrings.all.replace(
+        new RegExp(`publication_year:${year}\\b`),
+        `publication_year:${year - 1}`
+      );
+      run('prevYearTotal',   countUrl(prevYearAll),                            (j) => j?.meta?.count ?? 0);
+      run('prevYearCited',   countUrl(prevYearAll, 'cited_by_count:>0'),       (j) => j?.meta?.count ?? 0);
+      run('prevYearUncited', countUrl(prevYearAll, 'cited_by_count:0'),        (j) => j?.meta?.count ?? 0);
+    }
+
     run('topWorks', topWorksUrl(filterStrings.all), (j) =>
       (j.results || []).map((w) => ({
         id: w.id,
@@ -2339,7 +2544,7 @@ export default function ResearchOutputDashboard() {
       </header>
 
       <section className="mx-auto max-w-[1400px] px-6 pt-6">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
           <StatCard
             kicker={filterCount ? 'Filtered works' : `Total works · ${country} affiliated`}
             value={totalCount != null ? fmtFull(totalCount) : '—'}
@@ -2360,6 +2565,27 @@ export default function ResearchOutputDashboard() {
             sub={intlCount != null && totalCount ? `${fmtFull(intlCount)} works include ≥2 country affiliations.` : 'Loading slice…'}
             accent={PALETTE.teal}
             loading={state.intlCount?.status === 'loading' || state.total?.status === 'loading'}
+          />
+          <StatCard
+            kicker="Incoming citations"
+            value={
+              state.incomingCites?.data?.totalCites != null
+                ? fmt(state.incomingCites.data.totalCites)
+                : '—'
+            }
+            sub={
+              state.incomingCites?.data
+                ? (() => {
+                    const { totalCites, totalWorks, citedWorks } = state.incomingCites.data;
+                    if (!totalWorks) return 'No works in current selection.';
+                    const avg = (totalCites / totalWorks).toFixed(1);
+                    const citedShare = pct(citedWorks, totalWorks);
+                    return `${avg} cites/work avg · ${fmtFull(citedWorks)} of ${fmtFull(totalWorks)} works (${citedShare}) cited at least once.`;
+                  })()
+                : 'Loading slice…'
+            }
+            accent={PALETTE.rust}
+            loading={state.incomingCites?.status === 'loading'}
           />
           <StatCard
             kicker="Outgoing citations"
@@ -2760,6 +2986,40 @@ export default function ResearchOutputDashboard() {
                 onOpenTable={() => setTableOpenDim('funders')}
               />
             </ChartFrame>
+          </Card>
+
+          {/* Cited vs uncited overview, with prior-year comparison. Sits before
+              the Most-cited rankings as a high-level summary of the cited share. */}
+          <Card className="p-5 lg:col-span-12">
+            <SectionTitle
+              icon={Sparkles}
+              kicker="Citation reach"
+              title="Cited vs uncited share"
+              hint={year > 2000 ? `Compared to ${year - 1}` : null}
+              count={(() => {
+                const cited = state.citedShare?.data;
+                const total = (state.citedShare?.data || 0) + (state.uncitedShare?.data || 0);
+                if (!total) return null;
+                return `${pct(cited, total)} cited · ${fmtFull(total)} works`;
+              })()}
+            />
+            <p
+              className="-mt-2 mb-4 max-w-3xl"
+              style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
+            >
+              Share of {countryName(country)}-affiliated works that have received at least one citation versus
+              those still uncited, within the current filter selection. Citations accumulate over time, so a small
+              uncited share in the latest year is normal and decays as the corpus ages.
+            </p>
+            <CitationReachBars
+              currentCited={state.citedShare?.data}
+              currentUncited={state.uncitedShare?.data}
+              prevCited={state.prevYearCited?.data}
+              prevUncited={state.prevYearUncited?.data}
+              year={year}
+              status={state.citedShare?.status}
+              error={state.citedShare?.error}
+            />
           </Card>
 
           <Card className="p-5 lg:col-span-12">
