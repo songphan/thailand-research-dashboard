@@ -9,6 +9,8 @@ import {
   Table as TableIcon, Download, Search, ChevronDown
 } from 'lucide-react';
 
+import apcData from './data/apc_by_publisher.json';
+
 const OPENALEX_BASE = 'https://api.openalex.org';
 
 // OpenAlex API key. As of Feb 13, 2026, OpenAlex made API keys mandatory and
@@ -57,6 +59,35 @@ const OA_COLORS = {
 };
 
 const YEARS = [2025, 2024, 2023, 2022, 2021, 2020];
+
+// Per-country exclusion list for OpenAlex institutions that show up in a
+// country's roster (filter=country_code:XX) but whose papers are mostly
+// authored by researchers in other countries. This is an OpenAlex data quality
+// issue we route around at the dashboard layer.
+//
+// Verified example: "Ministry of Education" appears under filter=country_code:TH
+// with very high paper counts. Spot-checking the top-cited 2025 works (e.g.
+// 10.1038/s41589-025-01841-3) shows every author affiliated with Chinese
+// institutions, with no Thai-affiliated author on the byline. This is almost
+// certainly a name collision with the Chinese Ministry of Education (which
+// hosts many State Key Laboratories that publish in top venues).
+//
+// To add a new exclusion: add the full OpenAlex institution URL to the array
+// for the relevant country. The id should match the `id` field returned by
+// /institutions, which is the form `https://openalex.org/I123456789`.
+const EXCLUDED_INSTITUTIONS_BY_COUNTRY = {
+  TH: new Set([
+    // Ministry of Education (https://ror.org/036nq5137, www.en.moe.go.th).
+    // Legitimate Thai institution, but OpenAlex's affiliation-string matcher
+    // conflates "Ministry of Education" affiliations from Chinese authors with
+    // this entity. Spot-checking the top-cited 2025 works (e.g.
+    // 10.1038/s41589-025-01841-3) shows every author affiliated with Chinese
+    // institutions, with no Thai-affiliated author on the byline. Until
+    // OpenAlex resolves this disambiguation, we exclude the entity from the
+    // Thai roster so the counts don't mislead readers.
+    'https://openalex.org/I4210123333',
+  ]),
+};
 
 // Each dimension maps a panel key to its OpenAlex filter parameter, a friendly label,
 // and whether bars/slices in this chart should be clickable to apply a filter. The
@@ -3024,6 +3055,155 @@ const CountryRow = ({ c, active, onClick }) => (
   </button>
 );
 
+// ---------------------------------------------------------------------------
+// APC (Article Processing Charge) spend panel.
+//
+// Reads the precomputed apc_by_publisher.json (produced offline by
+// apc-pipeline/precompute_apc.mjs) and shows estimated national open-access
+// fees by publisher for the years currently selected in the masthead. The
+// figure is a LIST-PRICE CEILING attributed to Thai corresponding authors, not
+// actual spend. See the methods note in the panel and apc-pipeline/README.md.
+//
+// This panel is intentionally decoupled from the live OpenAlex panels: summing
+// APC requires per-work iteration that OpenAlex's group_by cannot do, so the
+// heavy lifting happens in the offline pipeline and this panel just renders the
+// result, refiltered by the selected years.
+const fmtUSD = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+const fmtTHB = (n) => '฿' + Math.round(n || 0).toLocaleString('en-US');
+
+const ApcPanel = ({ years }) => {
+  const ready = apcData && apcData.status !== 'placeholder' && (apcData.by_publisher || []).length > 0;
+  const activeYears = (years || []).filter((y) => (apcData.years || []).includes(y));
+  const usedYears = activeYears.length ? activeYears : (apcData.years || []);
+
+  const { rows, totalUsd, totalThb, totalWorks, totalPriced } = useMemo(() => {
+    if (!ready) return { rows: [], totalUsd: 0, totalThb: 0, totalWorks: 0, totalPriced: 0 };
+    let tUsd = 0, tThb = 0, tWorks = 0, tPriced = 0;
+    const rows = (apcData.by_publisher || []).map((p) => {
+      let usd = 0, thb = 0, works = 0, priced = 0;
+      for (const y of usedYears) {
+        const cell = (p.by_year || {})[y] || (p.by_year || {})[String(y)];
+        if (cell) { usd += cell.usd || 0; thb += cell.thb || 0; works += cell.works || 0; priced += cell.priced || 0; }
+      }
+      tUsd += usd; tThb += thb; tWorks += works; tPriced += priced;
+      return { key: p.publisher, label: cleanLabel(p.publisher, 34), usd, thb, works, priced, basis: p.basis };
+    }).filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
+    return { rows, totalUsd: tUsd, totalThb: tThb, totalWorks: tWorks, totalPriced: tPriced };
+  }, [ready, usedYears]);
+
+  const matchRate = totalWorks ? (totalPriced / totalWorks) : 0;
+  const yearLabel = usedYears.length === (apcData.years || []).length
+    ? `${Math.min(...usedYears)}–${Math.max(...usedYears)}`
+    : usedYears.join(', ');
+
+  if (!ready) {
+    return (
+      <Card className="p-5 lg:col-span-12">
+        <SectionTitle
+          icon={Banknote}
+          kicker="Open access fees"
+          title="Estimated APC spend by publisher"
+          hint="Awaiting precompute"
+        />
+        <div
+          className="rounded-sm px-4 py-6"
+          style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}
+        >
+          <p style={{ marginBottom: 8 }}>
+            This panel shows estimated national article processing charges paid to each publisher.
+            The data has not been computed yet.
+          </p>
+          <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>
+            Run <strong>node apc-pipeline/precompute_apc.mjs</strong> with an OpenAlex API key, then reload.
+          </p>
+        </div>
+      </Card>
+    );
+  }
+
+  const maxUsd = rows.length ? rows[0].usd : 1;
+  const TOP = 20;
+  const shown = rows.slice(0, TOP);
+
+  return (
+    <Card className="p-5 lg:col-span-12">
+      <SectionTitle
+        icon={Banknote}
+        kicker="Open access fees"
+        title="Estimated APC spend by publisher"
+        hint={`List-price ceiling · ${yearLabel} · corresponding-author basis`}
+        count={rows.length}
+        countLabel="publishers with priced output"
+      />
+
+      {/* Headline figures */}
+      <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (USD)</div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }} className="mt-2">{fmtUSD(totalUsd)}</div>
+        </div>
+        <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (THB)</div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.burgundy, lineHeight: 1.1 }} className="mt-2">{fmtTHB(totalThb)}</div>
+        </div>
+        <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Price match rate</div>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.teal, lineHeight: 1.1 }} className="mt-2">{(matchRate * 100).toFixed(1)}%</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(totalPriced)} of {fmtFull(totalWorks)} APC-bearing works priced</div>
+        </div>
+      </div>
+
+      {/* Publisher bars */}
+      <div className="space-y-2">
+        {shown.map((r) => (
+          <div key={r.key} className="flex items-center gap-3">
+            <div style={{ width: 200, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.key}>
+              {r.label}
+            </div>
+            <div className="flex-1">
+              <div style={{ height: 18, borderRadius: 2, background: PALETTE.gold, width: `${Math.max(2, (r.usd / maxUsd) * 100)}%`, transition: 'width 0.4s ease' }} title={`${fmtUSD(r.usd)} · ${fmtTHB(r.thb)}`} />
+            </div>
+            <div style={{ width: 220, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, flex: 'none' }}>
+              {fmtUSD(r.usd)}
+              <span style={{ color: PALETTE.muted }}> · {r.priced}/{r.works}</span>
+              {r.basis && (
+                <span
+                  title="How this publisher was priced: by ISSN is most precise; by title and flat rate are estimates."
+                  style={{
+                    marginLeft: 6, padding: '1px 5px', borderRadius: 2, fontSize: 9, letterSpacing: '0.04em',
+                    border: `1px solid ${PALETTE.rule}`,
+                    color: r.basis === 'by ISSN' ? PALETTE.teal : PALETTE.rust,
+                    background: PALETTE.cream,
+                  }}
+                >
+                  {r.basis}
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+        {rows.length > TOP && (
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="pt-1">
+            Showing top {TOP} of {rows.length} publishers by estimated spend.
+          </div>
+        )}
+      </div>
+
+      {/* Methods & caveats */}
+      <div className="mt-5 rounded-sm px-4 py-3" style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }} className="uppercase mb-2">Method &amp; caveats</div>
+        <ul style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.6, listStyle: 'disc', paddingLeft: 18 }}>
+          {(apcData.caveats || []).map((c, i) => (<li key={i} style={{ marginBottom: 3 }}>{c}</li>))}
+        </ul>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-2">
+          Prices from curated 2026 publisher lists (Elsevier, Wiley, Springer Nature) plus OpenAlex apc_list/DOAJ.
+          {apcData.generated_at ? ` Generated ${new Date(apcData.generated_at).toISOString().slice(0, 10)}.` : ''}
+        </div>
+      </div>
+    </Card>
+  );
+};
+
 export default function ResearchOutputDashboard() {
   useFonts();
 
@@ -3435,7 +3615,16 @@ export default function ResearchOutputDashboard() {
               subcategory: type === 'education' ? subcategoryFor(inst.display_name) : null,
             };
           })
-          .filter((d) => d.value > 0 && d.country === country)
+          .filter((d) => {
+            // Standard checks: positive paper count and matching country code.
+            if (d.value <= 0 || d.country !== country) return false;
+            // Exclude known-misclassified institutions for this country
+            // (data quality issue at OpenAlex; see comment near
+            // EXCLUDED_INSTITUTIONS_BY_COUNTRY at top of file).
+            const excluded = EXCLUDED_INSTITUTIONS_BY_COUNTRY[country];
+            if (excluded && excluded.has(d.key)) return false;
+            return true;
+          })
           .sort((a, b) => b.value - a.value);
         setPanel('institutions', { status: 'ready', data });
       } catch (e) {
@@ -3774,6 +3963,8 @@ export default function ResearchOutputDashboard() {
 
       <main className="mx-auto max-w-[1400px] px-6 py-8">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+          <ApcPanel years={years} />
+
           <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={Building2}
