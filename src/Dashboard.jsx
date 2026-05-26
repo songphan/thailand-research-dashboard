@@ -3171,13 +3171,13 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
     if (!apcReady) return null;
     let tUsd = 0, tThb = 0, tWorks = 0, tPriced = 0, gold = 0, hybrid = 0;
     const rows = (apcData.by_publisher || []).map((p) => {
-      let usd = 0, thb = 0, works = 0, priced = 0;
+      let usd = 0, thb = 0, works = 0, priced = 0, g = 0, h = 0;
       for (const y of yearsForNat) {
         const cell = (p.by_year || {})[y] || (p.by_year || {})[String(y)];
-        if (cell) { usd += cell.usd || 0; thb += cell.thb || 0; works += cell.works || 0; priced += cell.priced || 0; }
+        if (cell) { usd += cell.usd || 0; thb += cell.thb || 0; works += cell.works || 0; priced += cell.priced || 0; g += cell.gold || 0; h += cell.hybrid || 0; }
       }
       tUsd += usd; tThb += thb; tWorks += works; tPriced += priced;
-      return { key: p.publisher, label: cleanLabel(p.publisher, 34), usd, works, priced, basis: p.basis };
+      return { key: p.publisher, label: cleanLabel(p.publisher, 34), usd, works, priced, gold: g, hybrid: h, basis: p.basis };
     }).filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
     const oa = (apcData.by_oa_status && apcData.by_oa_status.by_year) || {};
     for (const y of yearsForNat) { const c = oa[y] || oa[String(y)]; if (c) { gold += c.gold || 0; hybrid += c.hybrid || 0; } }
@@ -3214,18 +3214,18 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
             const src = (w.primary_location && w.primary_location.source) || {};
             const pub = src.host_organization_name || 'Unknown / no publisher';
             const p = apcPriceWork(w);
-            if (!agg[pub]) agg[pub] = { usd: 0, works: 0, priced: 0 };
+            if (!agg[pub]) agg[pub] = { usd: 0, works: 0, priced: 0, gold: 0, hybrid: 0 };
             agg[pub].works++;
             if (p != null) {
               priced++; usd += p; agg[pub].usd += p; agg[pub].priced++;
-              if (oa === 'gold') gold += p; else if (oa === 'hybrid') hybrid += p;
+              if (oa === 'gold') { gold += p; agg[pub].gold += p; } else if (oa === 'hybrid') { hybrid += p; agg[pub].hybrid += p; }
             }
           }
           cursor = j.meta && j.meta.next_cursor;
           if (res.length < 200) break;
         }
         if (cancelled) return;
-        const rows = Object.entries(agg).map(([key, v]) => ({ key, label: cleanLabel(key, 34), usd: v.usd, works: v.works, priced: v.priced }))
+        const rows = Object.entries(agg).map(([key, v]) => ({ key, label: cleanLabel(key, 34), usd: v.usd, works: v.works, priced: v.priced, gold: v.gold, hybrid: v.hybrid }))
           .filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
         setLive({ status: 'ready', totalUsd: usd, totalThb: usd * APC_AVG_THB, totalWorks: works, totalPriced: priced, gold, hybrid, rows });
       } catch (e) {
@@ -3311,7 +3311,11 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
         <div key={r.key} className="flex items-center gap-3">
           <div style={{ width: 200, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.key}>{r.label}</div>
           <div className="flex-1">
-            <div style={{ height: 18, borderRadius: 2, background: PALETTE.gold, width: `${Math.max(2, (r.usd / maxUsd) * 100)}%`, transition: 'width 0.4s ease' }} title={fmtUSD(r.usd)} />
+            <div className="flex" style={{ height: 18, borderRadius: 2, overflow: 'hidden', width: `${Math.max(2, (r.usd / maxUsd) * 100)}%`, transition: 'width 0.4s ease' }}
+                 title={`${fmtUSD(r.usd)} (Gold ${fmtUSD(r.gold || 0)}, Hybrid ${fmtUSD(r.hybrid || 0)})`}>
+              <div style={{ width: `${r.usd ? ((r.gold || 0) / r.usd) * 100 : 0}%`, background: OA_COLORS.gold }} />
+              <div style={{ width: `${r.usd ? ((r.hybrid || 0) / r.usd) * 100 : 0}%`, background: OA_COLORS.hybrid }} />
+            </div>
           </div>
           <div style={{ width: 220, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, flex: 'none' }}>
             {fmtUSD(r.usd)}
