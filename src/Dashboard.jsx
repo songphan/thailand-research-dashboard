@@ -3201,12 +3201,20 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
         if (count > APC_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
         const SEL = 'id,open_access,primary_location,authorships,apc_list,apc_paid';
         const agg = {};
-        let usd = 0, works = 0, priced = 0, gold = 0, hybrid = 0, cursor = '*', guard = 0;
-        while (cursor && guard < 60) {
-          guard++;
-          const j = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&cursor=${encodeURIComponent(cursor)}`));
-          if (cancelled) return;
-          const res = j.results || [];
+        let usd = 0, works = 0, priced = 0, gold = 0, hybrid = 0;
+        // Fetch all pages in parallel. The selection is under the cap (< 10000),
+        // so OpenAlex numbered paging is valid and the pages don't need to run
+        // sequentially the way cursor paging does. The shared rate limiter still
+        // paces the sends, but no request waits on the previous one's response.
+        const pages = Math.min(50, Math.max(1, Math.ceil(count / 200)));
+        const pageResults = await Promise.all(
+          Array.from({ length: pages }, (_, i) =>
+            fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&page=${i + 1}`))
+              .then((j) => j.results || [])
+              .catch(() => []))
+        );
+        if (cancelled) return;
+        for (const res of pageResults) {
           for (const w of res) {
             if (!apcThaiCorr(w.authorships)) continue;
             works++;
@@ -3221,8 +3229,6 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
               if (oa === 'gold') { gold += p; agg[pub].gold += p; } else if (oa === 'hybrid') { hybrid += p; agg[pub].hybrid += p; }
             }
           }
-          cursor = j.meta && j.meta.next_cursor;
-          if (res.length < 200) break;
         }
         if (cancelled) return;
         const rows = Object.entries(agg).map(([key, v]) => ({ key, label: cleanLabel(key, 34), usd: v.usd, works: v.works, priced: v.priced, gold: v.gold, hybrid: v.hybrid }))
