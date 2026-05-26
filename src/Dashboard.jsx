@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 
 import apcData from './data/apc_by_publisher.json';
+import apcPricing from './data/apc_pricing.json';
+import publisherDefaults from './data/publisher_defaults.json';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
 
@@ -27,7 +29,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // burning your daily credits, which OpenAlex's per-IP rate limit largely
 // prevents anyway). If you'd rather hide the key, the proper path is a
 // small backend proxy that adds the key server-side.
-const OPENALEX_API_KEY = 'wPzRa7six3VGUf4dYxNYmv'; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
+const OPENALEX_API_KEY = ''; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -3071,137 +3073,276 @@ const CountryRow = ({ c, active, onClick }) => (
 const fmtUSD = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
 const fmtTHB = (n) => '฿' + Math.round(n || 0).toLocaleString('en-US');
 
-const ApcPanel = ({ years }) => {
-  const ready = apcData && apcData.status !== 'placeholder' && (apcData.by_publisher || []).length > 0;
-  const activeYears = (years || []).filter((y) => (apcData.years || []).includes(y));
-  const usedYears = activeYears.length ? activeYears : (apcData.years || []);
+// FX + client-side pricing helpers (mirror apc-pipeline/precompute_apc.mjs).
+const APC_GBP_USD = (apcData.currency && apcData.currency.gbp_usd) || 1.27;
+const APC_EUR_USD = (apcData.currency && apcData.currency.eur_usd) || 1.08;
+const APC_AVG_THB = 34.0;
+const APC_MAX_LIVE = 6000; // cap on works priced live per selection
+const apcStripIssn = (s) => (typeof s === 'string' ? s.toUpperCase().replace(/[^0-9X]/g, '') : '');
+const APC_STOP = /\b(the|a|an|of|and|for|in|on)\b/g;
+const apcNormTitle = (t) => {
+  if (!t) return null;
+  let s = String(t).toLowerCase().replace(/&/g, ' and ');
+  s = s.replace(/[^a-z0-9 ]+/g, ' ').replace(APC_STOP, ' ').replace(/\s+/g, ' ').trim();
+  return s || null;
+};
+const apcArrUsd = (a) => {
+  if (!a) return null;
+  if (a[0] != null) return a[0];
+  if (a[2] != null) return Math.round(a[2] * APC_GBP_USD);
+  if (a[1] != null) return Math.round(a[1] * APC_EUR_USD);
+  return null;
+};
+const apcObjUsd = (o) => {
+  if (!o) return null;
+  if (o.usd != null) return o.usd;
+  if (o.gbp != null) return Math.round(o.gbp * APC_GBP_USD);
+  if (o.eur != null) return Math.round(o.eur * APC_EUR_USD);
+  return null;
+};
+const apcDefaultsRe = (publisherDefaults || []).map((d) => ({ ...d, re: new RegExp(d.match, 'i') }));
+const apcPriceWork = (w) => {
+  const src = (w.primary_location && w.primary_location.source) || {};
+  const oa = (w.open_access && w.open_access.oa_status) || null;
+  const issns = [];
+  if (src.issn_l) issns.push(apcStripIssn(src.issn_l));
+  for (const i of (src.issn || [])) issns.push(apcStripIssn(i));
+  for (const n of issns) { const u = apcArrUsd(apcPricing.issn[n]); if (u != null) return u; }
+  const tn = apcNormTitle(src.display_name);
+  if (tn) { const u = apcArrUsd(apcPricing.title[tn]); if (u != null) return u; }
+  const host = src.host_organization_name || '';
+  for (const d of apcDefaultsRe) {
+    if (d.re.test(host)) {
+      const u = apcObjUsd(oa === 'gold' ? d.gold : oa === 'hybrid' ? d.hybrid : null);
+      if (u != null) return u;
+    }
+  }
+  if (w.apc_list && w.apc_list.value_usd != null) return w.apc_list.value_usd;
+  if (w.apc_paid && w.apc_paid.value_usd != null) return w.apc_paid.value_usd;
+  return null;
+};
+const apcThaiCorr = (authorships) => {
+  const isTH = (a) => (a.countries || []).includes('TH') || (a.institutions || []).some((i) => i.country_code === 'TH');
+  const corr = (authorships || []).filter((a) => a.is_corresponding);
+  if (corr.length) return corr.some(isTH);
+  const first = (authorships || []).find((a) => a.author_position === 'first') || (authorships || [])[0];
+  return first ? isTH(first) : false;
+};
 
-  const { rows, totalUsd, totalThb, totalWorks, totalPriced } = useMemo(() => {
-    if (!ready) return { rows: [], totalUsd: 0, totalThb: 0, totalWorks: 0, totalPriced: 0 };
-    let tUsd = 0, tThb = 0, tWorks = 0, tPriced = 0;
+// Gold-vs-hybrid proportion bar.
+const OaSplit = ({ gold, hybrid }) => {
+  const tot = (gold || 0) + (hybrid || 0);
+  if (tot <= 0) return null;
+  const gp = (gold / tot) * 100, hp = (hybrid / tot) * 100;
+  return (
+    <div className="mb-5">
+      <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase mb-2">
+        Gold vs hybrid open access
+      </div>
+      <div className="flex w-full overflow-hidden" style={{ height: 26, borderRadius: 3, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ width: `${gp}%`, background: OA_COLORS.gold, display: 'flex', alignItems: 'center', justifyContent: 'center', color: PALETTE.ink, fontFamily: FONT_MONO, fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden' }}
+             title={`Gold: ${fmtUSD(gold)} (${gp.toFixed(1)}%)`}>
+          {gp > 12 ? `Gold ${gp.toFixed(0)}%` : ''}
+        </div>
+        <div style={{ width: `${hp}%`, background: OA_COLORS.hybrid, display: 'flex', alignItems: 'center', justifyContent: 'center', color: PALETTE.paper, fontFamily: FONT_MONO, fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden' }}
+             title={`Hybrid: ${fmtUSD(hybrid)} (${hp.toFixed(1)}%)`}>
+          {hp > 12 ? `Hybrid ${hp.toFixed(0)}%` : ''}
+        </div>
+      </div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">
+        Gold {fmtUSD(gold)} · Hybrid {fmtUSD(hybrid)}
+      </div>
+    </div>
+  );
+};
+
+const ApcPanel = ({ years, country, filters, instFilterIds }) => {
+  const apcReady = apcData && apcData.status !== 'placeholder' && (apcData.by_publisher || []).length > 0;
+  const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
+  const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
+  const filterActive = hasChips || hasInst;
+  const instTooMany = hasInst && instFilterIds.length > 90;
+
+  const usedYears = ((years || []).filter((y) => (apcData.years || []).includes(y)));
+  const yearsForNat = usedYears.length ? usedYears : (apcData.years || []);
+
+  // National precomputed view, summed over the selected years.
+  const national = useMemo(() => {
+    if (!apcReady) return null;
+    let tUsd = 0, tThb = 0, tWorks = 0, tPriced = 0, gold = 0, hybrid = 0;
     const rows = (apcData.by_publisher || []).map((p) => {
       let usd = 0, thb = 0, works = 0, priced = 0;
-      for (const y of usedYears) {
+      for (const y of yearsForNat) {
         const cell = (p.by_year || {})[y] || (p.by_year || {})[String(y)];
         if (cell) { usd += cell.usd || 0; thb += cell.thb || 0; works += cell.works || 0; priced += cell.priced || 0; }
       }
       tUsd += usd; tThb += thb; tWorks += works; tPriced += priced;
-      return { key: p.publisher, label: cleanLabel(p.publisher, 34), usd, thb, works, priced, basis: p.basis };
+      return { key: p.publisher, label: cleanLabel(p.publisher, 34), usd, works, priced, basis: p.basis };
     }).filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
-    return { rows, totalUsd: tUsd, totalThb: tThb, totalWorks: tWorks, totalPriced: tPriced };
-  }, [ready, usedYears]);
+    const oa = (apcData.by_oa_status && apcData.by_oa_status.by_year) || {};
+    for (const y of yearsForNat) { const c = oa[y] || oa[String(y)]; if (c) { gold += c.gold || 0; hybrid += c.hybrid || 0; } }
+    return { rows, totalUsd: tUsd, totalThb: tThb, totalWorks: tWorks, totalPriced: tPriced, gold, hybrid };
+  }, [apcReady, JSON.stringify(yearsForNat)]);
 
-  const matchRate = totalWorks ? (totalPriced / totalWorks) : 0;
-  const yearLabel = usedYears.length === (apcData.years || []).length
-    ? `${Math.min(...usedYears)}–${Math.max(...usedYears)}`
-    : usedYears.join(', ');
+  // Live view, computed from OpenAlex for the exact current selection.
+  const [live, setLive] = useState({ status: 'idle' });
+  useEffect(() => {
+    if (!filterActive) { setLive({ status: 'idle' }); return; }
+    if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        setLive({ status: 'loading' });
+        let filter = buildFilterString(country, years, filters) + ',open_access.oa_status:gold|hybrid';
+        if (hasInst) filter += ',authorships.institutions.id:' + instFilterIds.join('|');
+        const cj = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&per-page=1`));
+        const count = (cj.meta && cj.meta.count) || 0;
+        if (cancelled) return;
+        if (count > APC_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
+        const SEL = 'id,open_access,primary_location,authorships,apc_list,apc_paid';
+        const agg = {};
+        let usd = 0, works = 0, priced = 0, gold = 0, hybrid = 0, cursor = '*', guard = 0;
+        while (cursor && guard < 60) {
+          guard++;
+          const j = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&cursor=${encodeURIComponent(cursor)}`));
+          if (cancelled) return;
+          const res = j.results || [];
+          for (const w of res) {
+            if (!apcThaiCorr(w.authorships)) continue;
+            works++;
+            const oa = (w.open_access && w.open_access.oa_status) || null;
+            const src = (w.primary_location && w.primary_location.source) || {};
+            const pub = src.host_organization_name || 'Unknown / no publisher';
+            const p = apcPriceWork(w);
+            if (!agg[pub]) agg[pub] = { usd: 0, works: 0, priced: 0 };
+            agg[pub].works++;
+            if (p != null) {
+              priced++; usd += p; agg[pub].usd += p; agg[pub].priced++;
+              if (oa === 'gold') gold += p; else if (oa === 'hybrid') hybrid += p;
+            }
+          }
+          cursor = j.meta && j.meta.next_cursor;
+          if (res.length < 200) break;
+        }
+        if (cancelled) return;
+        const rows = Object.entries(agg).map(([key, v]) => ({ key, label: cleanLabel(key, 34), usd: v.usd, works: v.works, priced: v.priced }))
+          .filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
+        setLive({ status: 'ready', totalUsd: usd, totalThb: usd * APC_AVG_THB, totalWorks: works, totalPriced: priced, gold, hybrid, rows });
+      } catch (e) {
+        if (!cancelled) setLive({ status: 'error', error: (e && e.message) || 'Live pricing failed' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
 
-  if (!ready) {
-    return (
-      <Card className="p-5 lg:col-span-12">
-        <SectionTitle
-          icon={Banknote}
-          kicker="Open access fees"
-          title="Estimated APC spend by publisher"
-          hint="Awaiting precompute"
-        />
-        <div
-          className="rounded-sm px-4 py-6"
-          style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}
-        >
-          <p style={{ marginBottom: 8 }}>
-            This panel shows estimated national article processing charges paid to each publisher.
-            The data has not been computed yet.
-          </p>
-          <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>
-            Run <strong>node apc-pipeline/precompute_apc.mjs</strong> with an OpenAlex API key, then reload.
-          </p>
-        </div>
-      </Card>
-    );
+  const header = (hint) => (
+    <SectionTitle icon={Banknote} kicker="Open access fees" title="Estimated APC spend by publisher" hint={hint} />
+  );
+  const wrap = (children) => <Card className="p-5 lg:col-span-12">{children}</Card>;
+
+  // Placeholder: no precompute and no active filter.
+  if (!apcReady && !filterActive) {
+    return wrap(<>
+      {header('Awaiting precompute')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
+        <p style={{ marginBottom: 8 }}>This panel shows estimated article processing charges paid to each publisher. The national data has not been computed yet.</p>
+        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>Run <strong>node apc-pipeline/precompute_apc.mjs</strong> with an OpenAlex API key, then reload. Filtering re-prices live.</p>
+      </div>
+    </>);
   }
 
-  const maxUsd = rows.length ? rows[0].usd : 1;
+  // Live status screens.
+  if (filterActive && live.status === 'loading') {
+    return wrap(<>{header('Live · pricing current selection…')}<div className="px-2 py-6"><SkeletonBars rows={6} /></div></>);
+  }
+  if (filterActive && live.status === 'toolarge') {
+    const msg = live.reason === 'inst'
+      ? `This institution-type selection spans too many institutions (${(instFilterIds || []).length}) to price live. Pick a narrower subtype or also select a discipline.`
+      : `This selection covers ${(live.count || 0).toLocaleString()} works, above the ${APC_MAX_LIVE.toLocaleString()} live-pricing cap. Narrow the filter (a specific institution, subfield, or fewer years) to price it live.`;
+    return wrap(<>{header('Selection too large for live pricing')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>{msg}</div>
+    </>);
+  }
+  if (filterActive && live.status === 'error') {
+    return wrap(<>{header('Live pricing unavailable')}
+      <div className="flex flex-col items-center justify-center px-4 py-10 text-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
+        <AlertCircle size={20} className="mb-2" />
+        <div style={{ fontSize: 13 }}>Could not price this selection live.</div>
+        <div style={{ fontSize: 11, color: PALETTE.muted, marginTop: 4 }}>{live.error}</div>
+      </div>
+    </>);
+  }
+
+  const v = filterActive ? (live.status === 'ready' ? live : null) : national;
+  if (!v) return wrap(<>{header('Open access fees')}<div className="px-2 py-6"><SkeletonBars rows={6} /></div></>);
+
+  const matchRate = v.totalWorks ? (v.totalPriced / v.totalWorks) : 0;
+  const yearLabel = yearsForNat.length === (apcData.years || []).length
+    ? `${Math.min(...yearsForNat)}–${Math.max(...yearsForNat)}` : yearsForNat.join(', ');
+  const hint = filterActive
+    ? `Live · current selection · ${yearLabel}`
+    : `National · precomputed · ${yearLabel}`;
+  const maxUsd = v.rows.length ? v.rows[0].usd : 1;
   const TOP = 20;
-  const shown = rows.slice(0, TOP);
+  const shown = v.rows.slice(0, TOP);
 
-  return (
-    <Card className="p-5 lg:col-span-12">
-      <SectionTitle
-        icon={Banknote}
-        kicker="Open access fees"
-        title="Estimated APC spend by publisher"
-        hint={`List-price ceiling · ${yearLabel} · corresponding-author basis`}
-        count={rows.length}
-        countLabel="publishers with priced output"
-      />
-
-      {/* Headline figures */}
-      <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (USD)</div>
-          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }} className="mt-2">{fmtUSD(totalUsd)}</div>
-        </div>
-        <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (THB)</div>
-          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.burgundy, lineHeight: 1.1 }} className="mt-2">{fmtTHB(totalThb)}</div>
-        </div>
-        <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Price match rate</div>
-          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.teal, lineHeight: 1.1 }} className="mt-2">{(matchRate * 100).toFixed(1)}%</div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(totalPriced)} of {fmtFull(totalWorks)} APC-bearing works priced</div>
-        </div>
+  return wrap(<>
+    {header(hint)}
+    <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (USD)</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }} className="mt-2">{fmtUSD(v.totalUsd)}</div>
       </div>
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (THB)</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.burgundy, lineHeight: 1.1 }} className="mt-2">{fmtTHB(v.totalThb)}</div>
+      </div>
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Price match rate</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.teal, lineHeight: 1.1 }} className="mt-2">{(matchRate * 100).toFixed(1)}%</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(v.totalPriced)} of {fmtFull(v.totalWorks)} APC-bearing works priced</div>
+      </div>
+    </div>
 
-      {/* Publisher bars */}
-      <div className="space-y-2">
-        {shown.map((r) => (
-          <div key={r.key} className="flex items-center gap-3">
-            <div style={{ width: 200, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.key}>
-              {r.label}
-            </div>
-            <div className="flex-1">
-              <div style={{ height: 18, borderRadius: 2, background: PALETTE.gold, width: `${Math.max(2, (r.usd / maxUsd) * 100)}%`, transition: 'width 0.4s ease' }} title={`${fmtUSD(r.usd)} · ${fmtTHB(r.thb)}`} />
-            </div>
-            <div style={{ width: 220, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, flex: 'none' }}>
-              {fmtUSD(r.usd)}
-              <span style={{ color: PALETTE.muted }}> · {r.priced}/{r.works}</span>
-              {r.basis && (
-                <span
-                  title="How this publisher was priced: by ISSN is most precise; by title and flat rate are estimates."
-                  style={{
-                    marginLeft: 6, padding: '1px 5px', borderRadius: 2, fontSize: 9, letterSpacing: '0.04em',
-                    border: `1px solid ${PALETTE.rule}`,
-                    color: r.basis === 'by ISSN' ? PALETTE.teal : PALETTE.rust,
-                    background: PALETTE.cream,
-                  }}
-                >
-                  {r.basis}
-                </span>
-              )}
-            </div>
+    <OaSplit gold={v.gold} hybrid={v.hybrid} />
+
+    <div className="space-y-2">
+      {shown.map((r) => (
+        <div key={r.key} className="flex items-center gap-3">
+          <div style={{ width: 200, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.key}>{r.label}</div>
+          <div className="flex-1">
+            <div style={{ height: 18, borderRadius: 2, background: PALETTE.gold, width: `${Math.max(2, (r.usd / maxUsd) * 100)}%`, transition: 'width 0.4s ease' }} title={fmtUSD(r.usd)} />
           </div>
-        ))}
-        {rows.length > TOP && (
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="pt-1">
-            Showing top {TOP} of {rows.length} publishers by estimated spend.
+          <div style={{ width: 220, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, flex: 'none' }}>
+            {fmtUSD(r.usd)}
+            <span style={{ color: PALETTE.muted }}> · {r.priced}/{r.works}</span>
+            {r.basis && (
+              <span title="How this publisher was priced: by ISSN is most precise; by title and flat rate are estimates."
+                style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 2, fontSize: 9, letterSpacing: '0.04em', border: `1px solid ${PALETTE.rule}`, color: r.basis === 'by ISSN' ? PALETTE.teal : PALETTE.rust, background: PALETTE.cream }}>
+                {r.basis}
+              </span>
+            )}
           </div>
-        )}
-      </div>
-
-      {/* Methods & caveats */}
-      <div className="mt-5 rounded-sm px-4 py-3" style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }} className="uppercase mb-2">Method &amp; caveats</div>
-        <ul style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.6, listStyle: 'disc', paddingLeft: 18 }}>
-          {(apcData.caveats || []).map((c, i) => (<li key={i} style={{ marginBottom: 3 }}>{c}</li>))}
-        </ul>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-2">
-          Prices from curated 2026 publisher lists (Elsevier, Wiley, Springer Nature) plus OpenAlex apc_list/DOAJ.
-          {apcData.generated_at ? ` Generated ${new Date(apcData.generated_at).toISOString().slice(0, 10)}.` : ''}
         </div>
+      ))}
+      {v.rows.length > TOP && (
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="pt-1">Showing top {TOP} of {v.rows.length} publishers by estimated spend.</div>
+      )}
+      {v.rows.length === 0 && (
+        <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-4">No priced open access works in this selection.</div>
+      )}
+    </div>
+
+    <div className="mt-5 rounded-sm px-4 py-3" style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }} className="uppercase mb-2">Method &amp; caveats</div>
+      <ul style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.6, listStyle: 'disc', paddingLeft: 18 }}>
+        {(apcData.caveats || []).map((c, i) => (<li key={i} style={{ marginBottom: 3 }}>{c}</li>))}
+      </ul>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-2">
+        {filterActive ? 'Live: priced from OpenAlex for the current selection (THB at an average rate).' : 'National: precomputed totals (THB at per-year rates).'} Prices from curated publisher lists plus OpenAlex apc_list/DOAJ.
       </div>
-    </Card>
-  );
+    </div>
+  </>);
 };
 
 export default function ResearchOutputDashboard() {
@@ -4131,32 +4272,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-4">
-            <SectionTitle
-              icon={FileText}
-              kicker="Output forms"
-              title="Document types"
-              count={panelN('docTypes')?.count}
-              countLabel="document types"
-            />
-            <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
-              <Donut
-                data={sliceFor('docTypes')}
-                height={260}
-                onSliceClick={onPick('docTypes')}
-                selectedKeys={selKeys('docTypes')}
-              />
-              <ChartControls
-                total={(state.docTypes?.data || []).length}
-                limit={limitFor('docTypes')}
-                onLimitChange={setLimit('docTypes')}
-                onOpenTable={() => setTableOpenDim('docTypes')}
-                options={[5, 7, 10]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-4">
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={BookOpen}
               kicker="Access regime"
@@ -4179,31 +4295,6 @@ export default function ResearchOutputDashboard() {
                 onLimitChange={setLimit('oaStatus')}
                 onOpenTable={() => setTableOpenDim('oaStatus')}
                 options={[5, 6]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-4">
-            <SectionTitle
-              icon={Languages}
-              kicker="Language of record"
-              title="Publication languages"
-              count={panelN('languages')?.count}
-              countLabel="languages"
-            />
-            <ChartFrame status={state.languages?.status} error={state.languages?.error}>
-              <Donut
-                data={sliceFor('languages')}
-                height={260}
-                onSliceClick={onPick('languages')}
-                selectedKeys={selKeys('languages')}
-              />
-              <ChartControls
-                total={(state.languages?.data || []).length}
-                limit={limitFor('languages')}
-                onLimitChange={setLimit('languages')}
-                onOpenTable={() => setTableOpenDim('languages')}
-                options={[5, 8, 12]}
               />
             </ChartFrame>
           </Card>
@@ -4233,112 +4324,16 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <ApcPanel years={years} />
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Globe2}
-              kicker="Co-authorship reach"
-              title="International collaborators"
-              hint={`${countryName(country)} excluded from list`}
-              count={panelN('collaborators')?.count}
-              countLabel={panelN('collaborators')?.truncated ? 'co-author countries · capped at 200' : 'co-author countries'}
-            />
-            <ChartFrame
-              status={state.collaborators?.status}
-              error={state.collaborators?.error}
-              hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
-            >
-              <HBar
-                data={sliceFor('collaborators')}
-                color={PALETTE.plum}
-                onBarClick={onPick('collaborators')}
-                selectedKeys={selKeys('collaborators')}
-              />
-              <ChartControls
-                total={(state.collaborators?.data || []).length}
-                limit={limitFor('collaborators')}
-                onLimitChange={setLimit('collaborators')}
-                onOpenTable={() => setTableOpenDim('collaborators')}
-              />
-              {/* Domestic-collaboration summary */}
-              {state.domesticCount?.status === 'ready' && totalCount ? (
-                <div
-                  className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
-                  style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
-                >
-                  <span
-                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
-                    className="uppercase"
-                  >
-                    Domestic-only
-                  </span>
-                  <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-                    <strong style={{ color: PALETTE.ink, fontFamily: FONT_MONO }}>
-                      {fmtFull(state.domesticCount.data)}
-                    </strong>{' '}
-                    works ({pct(state.domesticCount.data, totalCount)}) involve {countryName(country)} authors only — no
-                    international co-authors.
-                  </span>
-                </div>
-              ) : null}
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Target}
-              kicker="Mission alignment"
-              title="UN Sustainable Development Goals"
-              hint="OpenAlex SDG classifier"
-              count={panelN('sdgs')?.count}
-              countLabel="SDGs covered"
-            />
-            <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
-              <HBar
-                data={sliceFor('sdgs')}
-                color={PALETTE.gold}
-                onBarClick={onPick('sdgs')}
-                selectedKeys={selKeys('sdgs')}
-              />
-              <ChartControls
-                total={(state.sdgs?.data || []).length}
-                limit={limitFor('sdgs')}
-                onLimitChange={setLimit('sdgs')}
-                onOpenTable={() => setTableOpenDim('sdgs')}
-                options={[10, 14, 17]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Banknote}
-              kicker="Funding landscape"
-              title="Acknowledged funders"
-              hint="From grants metadata; coverage is partial"
-              count={panelN('funders')?.count}
-              countLabel={panelN('funders')?.truncated ? 'funders shown · capped at 200' : 'distinct funders'}
-            />
-            <ChartFrame
-              status={state.funders?.status}
-              error={state.funders?.error}
-              hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
-            >
-              <HBar
-                data={sliceFor('funders')}
-                color={PALETTE.rust}
-                onBarClick={onPick('funders')}
-                selectedKeys={selKeys('funders')}
-              />
-              <ChartControls
-                total={(state.funders?.data || []).length}
-                limit={limitFor('funders')}
-                onLimitChange={setLimit('funders')}
-                onOpenTable={() => setTableOpenDim('funders')}
-              />
-            </ChartFrame>
-          </Card>
+          <ApcPanel
+            years={years}
+            country={country}
+            filters={filters}
+            instFilterIds={
+              (instTypeFilter === 'all' && instSubcategoryFilter === 'all')
+                ? null
+                : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
+            }
+          />
 
           {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
               years for comparison; in multi-year mode shows just the aggregate. */}
@@ -4491,6 +4486,161 @@ export default function ResearchOutputDashboard() {
                   </li>
                 ))}
               </ol>
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={FileText}
+              kicker="Output forms"
+              title="Document types"
+              count={panelN('docTypes')?.count}
+              countLabel="document types"
+            />
+            <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
+              <Donut
+                data={sliceFor('docTypes')}
+                height={260}
+                onSliceClick={onPick('docTypes')}
+                selectedKeys={selKeys('docTypes')}
+              />
+              <ChartControls
+                total={(state.docTypes?.data || []).length}
+                limit={limitFor('docTypes')}
+                onLimitChange={setLimit('docTypes')}
+                onOpenTable={() => setTableOpenDim('docTypes')}
+                options={[5, 7, 10]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Languages}
+              kicker="Language of record"
+              title="Publication languages"
+              count={panelN('languages')?.count}
+              countLabel="languages"
+            />
+            <ChartFrame status={state.languages?.status} error={state.languages?.error}>
+              <Donut
+                data={sliceFor('languages')}
+                height={260}
+                onSliceClick={onPick('languages')}
+                selectedKeys={selKeys('languages')}
+              />
+              <ChartControls
+                total={(state.languages?.data || []).length}
+                limit={limitFor('languages')}
+                onLimitChange={setLimit('languages')}
+                onOpenTable={() => setTableOpenDim('languages')}
+                options={[5, 8, 12]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Globe2}
+              kicker="Co-authorship reach"
+              title="International collaborators"
+              hint={`${countryName(country)} excluded from list`}
+              count={panelN('collaborators')?.count}
+              countLabel={panelN('collaborators')?.truncated ? 'co-author countries · capped at 200' : 'co-author countries'}
+            />
+            <ChartFrame
+              status={state.collaborators?.status}
+              error={state.collaborators?.error}
+              hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
+            >
+              <HBar
+                data={sliceFor('collaborators')}
+                color={PALETTE.plum}
+                onBarClick={onPick('collaborators')}
+                selectedKeys={selKeys('collaborators')}
+              />
+              <ChartControls
+                total={(state.collaborators?.data || []).length}
+                limit={limitFor('collaborators')}
+                onLimitChange={setLimit('collaborators')}
+                onOpenTable={() => setTableOpenDim('collaborators')}
+              />
+              {/* Domestic-collaboration summary */}
+              {state.domesticCount?.status === 'ready' && totalCount ? (
+                <div
+                  className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
+                  style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
+                >
+                  <span
+                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                    className="uppercase"
+                  >
+                    Domestic-only
+                  </span>
+                  <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+                    <strong style={{ color: PALETTE.ink, fontFamily: FONT_MONO }}>
+                      {fmtFull(state.domesticCount.data)}
+                    </strong>{' '}
+                    works ({pct(state.domesticCount.data, totalCount)}) involve {countryName(country)} authors only — no
+                    international co-authors.
+                  </span>
+                </div>
+              ) : null}
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Target}
+              kicker="Mission alignment"
+              title="UN Sustainable Development Goals"
+              hint="OpenAlex SDG classifier"
+              count={panelN('sdgs')?.count}
+              countLabel="SDGs covered"
+            />
+            <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
+              <HBar
+                data={sliceFor('sdgs')}
+                color={PALETTE.gold}
+                onBarClick={onPick('sdgs')}
+                selectedKeys={selKeys('sdgs')}
+              />
+              <ChartControls
+                total={(state.sdgs?.data || []).length}
+                limit={limitFor('sdgs')}
+                onLimitChange={setLimit('sdgs')}
+                onOpenTable={() => setTableOpenDim('sdgs')}
+                options={[10, 14, 17]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Banknote}
+              kicker="Funding landscape"
+              title="Acknowledged funders"
+              hint="From grants metadata; coverage is partial"
+              count={panelN('funders')?.count}
+              countLabel={panelN('funders')?.truncated ? 'funders shown · capped at 200' : 'distinct funders'}
+            />
+            <ChartFrame
+              status={state.funders?.status}
+              error={state.funders?.error}
+              hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
+            >
+              <HBar
+                data={sliceFor('funders')}
+                color={PALETTE.rust}
+                onBarClick={onPick('funders')}
+                selectedKeys={selKeys('funders')}
+              />
+              <ChartControls
+                total={(state.funders?.data || []).length}
+                limit={limitFor('funders')}
+                onLimitChange={setLimit('funders')}
+                onOpenTable={() => setTableOpenDim('funders')}
+              />
             </ChartFrame>
           </Card>
         </div>
