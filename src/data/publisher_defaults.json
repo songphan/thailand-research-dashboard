@@ -1,0 +1,14 @@
+[
+  { "name": "American Chemical Society", "match": "american chemical|\\bacs\\b",
+    "hybrid": { "usd": 4500 }, "gold": { "usd": 3500 },
+    "note": "ACS tiered list pricing: hybrid standard $4500, fully OA $3500 (ACS Omega $1935 handled as named row)." },
+  { "name": "Royal Society of Chemistry", "match": "royal society of chem|\\brsc\\b",
+    "hybrid": { "gbp": 3100 }, "gold": { "gbp": 2200 },
+    "note": "RSC flat pricing: all hybrid journals GBP 3100; gold journals GBP 2200 (several waived)." },
+  { "name": "Emerald", "match": "emerald",
+    "hybrid": { "usd": 4351 },
+    "note": "Emerald flat hybrid APC GBP 3222 / USD 4351 / EUR 3710. Gold journals vary and are DOAJ-covered." },
+  { "name": "Taylor & Francis", "match": "taylor|francis|routledge|\\binforma\\b",
+    "hybrid": { "usd": 3940 },
+    "note": "T&F standard hybrid (Open Select) APC. Verified 2026-05-26 from the T&F Open Access Cost Finder: Research Article, Thailand = USD 3940. T&F hybrid APCs vary by journal, so this is a representative standard rate (shown as 'flat rate' in the dashboard). Gold T&F journals are DOAJ-covered by the OpenAlex fallback. Source export of 2512 T&F journals with ISSN + OA status saved in apc/taylor francis/." }
+]

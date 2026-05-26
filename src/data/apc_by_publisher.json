@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-26T02:08:36.146Z",
+  "generated_at": "2026-05-26T02:41:34.362Z",
   "method": {
     "corpus": "OpenAlex Works, authorships.institutions.country_code:TH",
     "oa_pathways_counted": [
@@ -37,50 +37,50 @@
     2024,
     2025
   ],
-  "grand_total_usd": 99462332,
-  "grand_total_thb": 3400423984,
+  "grand_total_usd": 99792181,
+  "grand_total_thb": 3411760337,
   "totals_by_year": {
     "2020": {
-      "usd": 8833587,
-      "thb": 276491273,
+      "usd": 8859730,
+      "thb": 277309549,
       "works_apc_bearing": 4927,
-      "works_priced": 4157,
-      "match_rate": 0.844
+      "works_priced": 4163,
+      "match_rate": 0.845
     },
     "2021": {
-      "usd": 13413345,
-      "thb": 429227040,
+      "usd": 13432681,
+      "thb": 429845792,
       "works_apc_bearing": 7174,
-      "works_priced": 6143,
-      "match_rate": 0.856
+      "works_priced": 6146,
+      "match_rate": 0.857
     },
     "2022": {
-      "usd": 17595681,
-      "thb": 617608403,
+      "usd": 17676115,
+      "thb": 620431637,
       "works_apc_bearing": 9195,
-      "works_priced": 7954,
-      "match_rate": 0.865
+      "works_priced": 7969,
+      "match_rate": 0.867
     },
     "2023": {
-      "usd": 16727946,
-      "thb": 582132521,
+      "usd": 16809742,
+      "thb": 584979022,
       "works_apc_bearing": 9468,
-      "works_priced": 7545,
-      "match_rate": 0.797
+      "works_priced": 7565,
+      "match_rate": 0.799
     },
     "2024": {
-      "usd": 18998222,
-      "thb": 670637237,
+      "usd": 19017922,
+      "thb": 671332647,
       "works_apc_bearing": 10307,
-      "works_priced": 8386,
+      "works_priced": 8391,
       "match_rate": 0.814
     },
     "2025": {
-      "usd": 23893551,
-      "thb": 824327510,
+      "usd": 23995991,
+      "thb": 827861690,
       "works_apc_bearing": 12276,
-      "works_priced": 10261,
-      "match_rate": 0.836
+      "works_priced": 10287,
+      "match_rate": 0.838
     }
   },
   "by_publisher": [
@@ -683,6 +683,52 @@
       "total_priced": 758
     },
     {
+      "publisher": "Taylor & Francis",
+      "basis": "OpenAlex",
+      "by_year": {
+        "2020": {
+          "usd": 108180,
+          "thb": 3386034,
+          "works": 54,
+          "priced": 54
+        },
+        "2021": {
+          "usd": 107963,
+          "thb": 3454816,
+          "works": 57,
+          "priced": 56
+        },
+        "2022": {
+          "usd": 286404,
+          "thb": 10052780,
+          "works": 129,
+          "priced": 129
+        },
+        "2023": {
+          "usd": 252585,
+          "thb": 8789958,
+          "works": 121,
+          "priced": 121
+        },
+        "2024": {
+          "usd": 204244,
+          "thb": 7209813,
+          "works": 116,
+          "priced": 116
+        },
+        "2025": {
+          "usd": 371268,
+          "thb": 12808746,
+          "works": 207,
+          "priced": 207
+        }
+      },
+      "total_usd": 1330644,
+      "total_thb": 45702148,
+      "total_works": 684,
+      "total_priced": 683
+    },
+    {
       "publisher": "Springer Nature",
       "basis": "by ISSN",
       "by_year": {
@@ -773,52 +819,6 @@
       "total_thb": 39422311,
       "total_works": 401,
       "total_priced": 401
-    },
-    {
-      "publisher": "Taylor & Francis",
-      "basis": "OpenAlex",
-      "by_year": {
-        "2020": {
-          "usd": 85977,
-          "thb": 2691080,
-          "works": 54,
-          "priced": 49
-        },
-        "2021": {
-          "usd": 88627,
-          "thb": 2836064,
-          "works": 57,
-          "priced": 53
-        },
-        "2022": {
-          "usd": 209910,
-          "thb": 7367841,
-          "works": 129,
-          "priced": 115
-        },
-        "2023": {
-          "usd": 174729,
-          "thb": 6080569,
-          "works": 121,
-          "priced": 102
-        },
-        "2024": {
-          "usd": 188484,
-          "thb": 6653485,
-          "works": 116,
-          "priced": 112
-        },
-        "2025": {
-          "usd": 292468,
-          "thb": 10090146,
-          "works": 207,
-          "priced": 187
-        }
-      },
-      "total_usd": 1040195,
-      "total_thb": 35719186,
-      "total_works": 684,
-      "total_priced": 618
     },
     {
       "publisher": "SAGE Publishing",
@@ -1745,10 +1745,10 @@
       "basis": "OpenAlex",
       "by_year": {
         "2020": {
-          "usd": 4636,
-          "thb": 145107,
+          "usd": 8576,
+          "thb": 268429,
           "works": 4,
-          "priced": 3
+          "priced": 4
         },
         "2021": {
           "usd": 17899,
@@ -1775,16 +1775,16 @@
           "priced": 4
         },
         "2025": {
-          "usd": 63517,
-          "thb": 2191337,
+          "usd": 75337,
+          "thb": 2599127,
           "works": 28,
-          "priced": 25
+          "priced": 28
         }
       },
-      "total_usd": 131911,
-      "total_thb": 4512520,
+      "total_usd": 147671,
+      "total_thb": 5043632,
       "total_works": 57,
-      "total_priced": 53
+      "total_priced": 57
     },
     {
       "publisher": "Institution of Engineering and Technology",
@@ -3993,6 +3993,52 @@
       "total_thb": 845429,
       "total_works": 21,
       "total_priced": 17
+    },
+    {
+      "publisher": "Routledge",
+      "basis": "flat rate",
+      "by_year": {
+        "2020": {
+          "usd": 0,
+          "thb": 0,
+          "works": 0,
+          "priced": 0
+        },
+        "2021": {
+          "usd": 0,
+          "thb": 0,
+          "works": 0,
+          "priced": 0
+        },
+        "2022": {
+          "usd": 3940,
+          "thb": 138294,
+          "works": 1,
+          "priced": 1
+        },
+        "2023": {
+          "usd": 3940,
+          "thb": 137112,
+          "works": 1,
+          "priced": 1
+        },
+        "2024": {
+          "usd": 3940,
+          "thb": 139082,
+          "works": 1,
+          "priced": 1
+        },
+        "2025": {
+          "usd": 11820,
+          "thb": 407790,
+          "works": 3,
+          "priced": 3
+        }
+      },
+      "total_usd": 23640,
+      "total_thb": 822278,
+      "total_works": 6,
+      "total_priced": 6
     },
     {
       "publisher": "KeAi",
@@ -21705,52 +21751,6 @@
       "total_priced": 0
     },
     {
-      "publisher": "Routledge",
-      "basis": "unpriced",
-      "by_year": {
-        "2020": {
-          "usd": 0,
-          "thb": 0,
-          "works": 0,
-          "priced": 0
-        },
-        "2021": {
-          "usd": 0,
-          "thb": 0,
-          "works": 0,
-          "priced": 0
-        },
-        "2022": {
-          "usd": 0,
-          "thb": 0,
-          "works": 1,
-          "priced": 0
-        },
-        "2023": {
-          "usd": 0,
-          "thb": 0,
-          "works": 1,
-          "priced": 0
-        },
-        "2024": {
-          "usd": 0,
-          "thb": 0,
-          "works": 1,
-          "priced": 0
-        },
-        "2025": {
-          "usd": 0,
-          "thb": 0,
-          "works": 3,
-          "priced": 0
-        }
-      },
-      "total_usd": 0,
-      "total_thb": 0,
-      "total_works": 6,
-      "total_priced": 0
-    },
-    {
       "publisher": "Korean Society for Horticultural Science",
       "basis": "unpriced",
       "by_year": {
@@ -25206,14 +25206,14 @@
     "first_author_fallback": 0
   },
   "price_sources": {
-    "unmatched": 8901,
+    "unmatched": 8826,
     "reference": 17595,
-    "openalex_apc_list": 25375,
+    "openalex_apc_list": 25361,
     "title": 784,
-    "default": 687,
-    "openalex_apc_paid": 5
+    "default": 777,
+    "openalex_apc_paid": 4
   },
-  "unpriced_journal_count": 1230,
+  "unpriced_journal_count": 1174,
   "unpriced_top": [
     {
       "title": null,
