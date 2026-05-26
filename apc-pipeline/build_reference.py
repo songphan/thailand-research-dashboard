@@ -480,6 +480,22 @@ def main():
         w.writeheader()
         w.writerows(records)
 
+    # Compact client pricing file for the dashboard's live APC panel:
+    # issn_norm -> [usd, eur, gbp] and title_norm -> [usd, eur, gbp].
+    issn_map, title_map = {}, {}
+    for r in records:
+        val = [r.get("usd"), r.get("eur"), r.get("gbp")]
+        if all(v is None for v in val):
+            continue
+        if r.get("issn_norm") and r["issn_norm"] not in issn_map:
+            issn_map[r["issn_norm"]] = val
+        if r.get("title_norm") and r["title_norm"] not in title_map:
+            title_map[r["title_norm"]] = val
+    data_dir = os.path.join(HERE, "..", "src", "data")
+    os.makedirs(data_dir, exist_ok=True)
+    with open(os.path.join(data_dir, "apc_pricing.json"), "w", encoding="utf-8") as fh:
+        json.dump({"issn": issn_map, "title": title_map}, fh, ensure_ascii=False, separators=(",", ":"))
+
     print("Validated (bespoke) parsers:")
     for k, v in bespoke_counts.items():
         print("  %-48s %d" % (k[:48], v))

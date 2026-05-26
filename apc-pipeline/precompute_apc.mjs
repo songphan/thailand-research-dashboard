@@ -1,15 +1,11 @@
 #!/usr/bin/env node
 /*
- * precompute_apc.mjs - estimates national APC spend for Thailand by publisher and
- * year, and writes ../src/data/apc_by_publisher.json for the dashboard.
+ * precompute_apc.mjs - estimates national APC spend for Thailand by publisher,
+ * year, and OA status, and writes ../src/data/apc_by_publisher.json. The
+ * dashboard uses this for the no-filter national view; when a filter is active
+ * the dashboard prices live in the browser using ../src/data/apc_pricing.json.
  *
- * Pricing tiers per work (first hit wins):
- *   1. ISSN match against the curated reference (USD, else GBP/EUR converted).
- *   2. Journal-title match against the reference (publishers whose lists lack ISSNs).
- *   3. Publisher default flat rate by OA status (publisher_defaults.json).
- *   4. OpenAlex apc_list / apc_paid.
- *   5. unmatched (counted, not summed; surfaced as match rate + worklist).
- *
+ * Pricing tiers per work: ISSN -> journal title -> publisher default -> OpenAlex.
  * Requires Node 18+ (global fetch). Run:  node precompute_apc.mjs
  */
 
@@ -24,6 +20,7 @@ const OPENALEX_API_KEY = process.env.OPENALEX_API_KEY || '';
 const THB_PER_USD = { 2020: 31.3, 2021: 32.0, 2022: 35.1, 2023: 34.8, 2024: 35.3, 2025: 34.5 };
 const GBP_USD = 1.27;
 const EUR_USD = 1.08;
+const AVG_THB = 34.0; // single rate for OA-split totals (cross-year)
 
 const OPENALEX_BASE = 'https://api.openalex.org';
 const SELECT = 'id,doi,publication_year,apc_list,apc_paid,open_access,primary_location,authorships';
@@ -118,7 +115,6 @@ function thaiCorresponding(authorships) {
 function priceWork(w) {
   const src = (w.primary_location && w.primary_location.source) || {};
   const oa = (w.open_access && w.open_access.oa_status) || null;
-
   const issns = [];
   if (src.issn_l) issns.push(stripIssn(src.issn_l));
   for (const i of (src.issn || [])) issns.push(stripIssn(i));
@@ -127,14 +123,12 @@ function priceWork(w) {
     const c = toUsd(ref);
     if (c) return { usd: c.usd, priceSource: 'reference:' + ref.publisher + c.note };
   }
-
   const tn = normTitle(src.display_name);
   if (tn && refByTitle.has(tn)) {
     const ref = refByTitle.get(tn);
     const c = toUsd(ref);
     if (c) return { usd: c.usd, priceSource: 'title:' + ref.publisher + c.note };
   }
-
   const host = src.host_organization_name || '';
   for (const d of publisherDefaults) {
     if (d._re.test(host)) {
@@ -143,7 +137,6 @@ function priceWork(w) {
       if (c) return { usd: c.usd, priceSource: 'default:' + d.name + c.note };
     }
   }
-
   if (w.apc_list && w.apc_list.value_usd != null) return { usd: w.apc_list.value_usd, priceSource: 'openalex_apc_list' };
   if (w.apc_paid && w.apc_paid.value_usd != null) return { usd: w.apc_paid.value_usd, priceSource: 'openalex_apc_paid' };
   return { usd: null, priceSource: 'unmatched' };
@@ -162,6 +155,7 @@ async function pullYear(year) {
   ].join(',');
 
   const agg = {};
+  const oaUsd = { gold: 0, hybrid: 0 };
   let cursor = '*';
   let scanned = 0, thaiCorr = 0, priced = 0, pageNo = 0;
   const methodCount = { corresponding: 0, first_author_fallback: 0 };
@@ -180,6 +174,7 @@ async function pullYear(year) {
       thaiCorr++;
       methodCount[method]++;
       const pub = publisherName(w);
+      const oaStat = (w.open_access && w.open_access.oa_status) || null;
       const { usd, priceSource } = priceWork(w);
       const srcKind = priceSource.split(':')[0];
       priceSrcCount[srcKind] = (priceSrcCount[srcKind] || 0) + 1;
@@ -188,6 +183,7 @@ async function pullYear(year) {
       agg[pub].works++;
       if (usd != null) {
         agg[pub].priced++; agg[pub].usd += usd; priced++;
+        if (oaStat && oaUsd[oaStat] !== undefined) oaUsd[oaStat] += usd;
       } else {
         const src = (w.primary_location && w.primary_location.source) || {};
         const key = src.issn_l || src.id || src.display_name || 'unknown';
@@ -197,7 +193,7 @@ async function pullYear(year) {
             issn_l: src.issn_l || null,
             issn: (src.issn || []).join(' '),
             publisher: pub,
-            oa_status: (w.open_access && w.open_access.oa_status) || null,
+            oa_status: oaStat,
             works: 0,
           };
         }
@@ -210,7 +206,7 @@ async function pullYear(year) {
     process.stdout.write(`\r  ${year}: page ${pageNo}, scanned ${scanned}, Thai-corresponding ${thaiCorr}, priced ${priced}   `);
   }
   process.stdout.write('\n');
-  return { year, agg, scanned, thaiCorr, priced, methodCount, priceSrcCount, unpriced };
+  return { year, agg, oaUsd, scanned, thaiCorr, priced, methodCount, priceSrcCount, unpriced };
 }
 
 async function main() {
@@ -246,6 +242,7 @@ async function main() {
   }).sort((a, b) => b.total_usd - a.total_usd);
 
   const totals_by_year = {};
+  const oa_by_year = {};
   for (const py of perYear) {
     let usd = 0;
     for (const a of Object.values(py.agg)) usd += a.usd;
@@ -256,7 +253,20 @@ async function main() {
       works_priced: py.priced,
       match_rate: py.thaiCorr ? +(py.priced / py.thaiCorr).toFixed(3) : 0,
     };
+    oa_by_year[py.year] = {
+      gold: Math.round(py.oaUsd.gold),
+      hybrid: Math.round(py.oaUsd.hybrid),
+    };
   }
+
+  // Gold vs hybrid split across all years (the requested proportion).
+  let goldUsd = 0, hybridUsd = 0;
+  for (const py of perYear) { goldUsd += py.oaUsd.gold; hybridUsd += py.oaUsd.hybrid; }
+  const by_oa_status = {
+    gold: { usd: Math.round(goldUsd), thb: Math.round(goldUsd * AVG_THB) },
+    hybrid: { usd: Math.round(hybridUsd), thb: Math.round(hybridUsd * AVG_THB) },
+    by_year: oa_by_year,
+  };
 
   const grand_usd = Object.values(totals_by_year).reduce((s, t) => s + t.usd, 0);
   const grand_thb = Object.values(totals_by_year).reduce((s, t) => s + t.thb, 0);
@@ -284,6 +294,7 @@ async function main() {
     grand_total_usd: grand_usd,
     grand_total_thb: grand_thb,
     totals_by_year,
+    by_oa_status,
     by_publisher: byPublisher,
     attribution_methods: perYear.reduce((acc, py) => {
       for (const [k, v] of Object.entries(py.methodCount)) acc[k] = (acc[k] || 0) + v;
@@ -299,8 +310,8 @@ async function main() {
       'Figures are an estimated list-price ceiling, not actual spend. Transformative/read-and-publish agreements, institutional memberships, and negotiated discounts reduce real outlay.',
       'Only Gold and Hybrid open access works incur an APC; Diamond, Green, Bronze, and Closed works are excluded.',
       'Attribution is by corresponding author. Works with no flagged corresponding author fall back to the first author.',
-      'Each publisher row is labelled with how it was priced: "by ISSN" (most precise), "by title", or "flat rate" (a publisher-wide default, e.g. ACS/RSC/Emerald). Title and flat-rate figures are estimates, not exact per-journal prices.',
-      'Prices given only in GBP or EUR are converted to USD at fixed documented rates; THB uses per-year averages. See currency.',
+      'Each publisher row is labelled with how it was priced: by ISSN (most precise), by title, or flat rate (a publisher-wide default such as ACS/RSC/Emerald). Title and flat-rate figures are estimates, not exact per-journal prices.',
+      'When a filter is active the panel re-prices the exact selection live from OpenAlex; with no filter it shows these precomputed national totals.',
     ],
   };
 
@@ -317,10 +328,9 @@ async function main() {
   fs.writeFileSync(path.join(__dirname, 'unpriced_journals.csv'), '﻿' + csv.join('\n'));
 
   console.log(`\nWrote ${outPath}`);
-  console.log(`Wrote ${wlJson} (${unpricedList.length} unpriced journals)`);
   console.log(`Grand total: USD ${grand_usd.toLocaleString()}  /  THB ${grand_thb.toLocaleString()}`);
+  console.log(`Gold: USD ${by_oa_status.gold.usd.toLocaleString()}   Hybrid: USD ${by_oa_status.hybrid.usd.toLocaleString()}`);
   console.log('Price sources:', JSON.stringify(out.price_sources));
-  console.log('Top publishers by estimated APC:');
   byPublisher.slice(0, 12).forEach((p) =>
     console.log(`  ${p.publisher.padEnd(32)} ${('[' + p.basis + ']').padEnd(12)} USD ${p.total_usd.toLocaleString().padStart(11)}  (${p.total_priced}/${p.total_works})`));
   const overall = Object.values(totals_by_year);
