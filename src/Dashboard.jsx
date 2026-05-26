@@ -3963,8 +3963,6 @@ export default function ResearchOutputDashboard() {
 
       <main className="mx-auto max-w-[1400px] px-6 py-8">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <ApcPanel years={years} />
-
           <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={Building2}
@@ -4234,6 +4232,8 @@ export default function ResearchOutputDashboard() {
               />
             </ChartFrame>
           </Card>
+
+          <ApcPanel years={years} />
 
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
