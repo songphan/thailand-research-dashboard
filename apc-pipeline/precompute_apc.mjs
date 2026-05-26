@@ -178,12 +178,13 @@ async function pullYear(year) {
       const { usd, priceSource } = priceWork(w);
       const srcKind = priceSource.split(':')[0];
       priceSrcCount[srcKind] = (priceSrcCount[srcKind] || 0) + 1;
-      if (!agg[pub]) agg[pub] = { works: 0, priced: 0, usd: 0, srcs: {} };
+      if (!agg[pub]) agg[pub] = { works: 0, priced: 0, usd: 0, gold: 0, hybrid: 0, srcs: {} };
       agg[pub].srcs[srcKind] = (agg[pub].srcs[srcKind] || 0) + 1;
       agg[pub].works++;
       if (usd != null) {
         agg[pub].priced++; agg[pub].usd += usd; priced++;
         if (oaStat && oaUsd[oaStat] !== undefined) oaUsd[oaStat] += usd;
+        if (oaStat === 'gold') agg[pub].gold += usd; else if (oaStat === 'hybrid') agg[pub].hybrid += usd;
       } else {
         const src = (w.primary_location && w.primary_location.source) || {};
         const key = src.issn_l || src.id || src.display_name || 'unknown';
@@ -229,9 +230,9 @@ async function main() {
     const srcs = {};
     let total_usd = 0, total_thb = 0, total_works = 0, total_priced = 0;
     for (const py of perYear) {
-      const a = py.agg[pub] || { works: 0, priced: 0, usd: 0, srcs: {} };
+      const a = py.agg[pub] || { works: 0, priced: 0, usd: 0, gold: 0, hybrid: 0, srcs: {} };
       const thb = a.usd * (THB_PER_USD[py.year] || 0);
-      by_year[py.year] = { usd: Math.round(a.usd), thb: Math.round(thb), works: a.works, priced: a.priced };
+      by_year[py.year] = { usd: Math.round(a.usd), thb: Math.round(thb), works: a.works, priced: a.priced, gold: Math.round(a.gold), hybrid: Math.round(a.hybrid) };
       total_usd += a.usd; total_thb += thb; total_works += a.works; total_priced += a.priced;
       for (const [k, v] of Object.entries(a.srcs || {})) srcs[k] = (srcs[k] || 0) + v;
     }
