@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-26T02:41:34.362Z",
+  "generated_at": "2026-05-26T03:13:02.174Z",
   "method": {
     "corpus": "OpenAlex Works, authorships.institutions.country_code:TH",
     "oa_pathways_counted": [
@@ -81,6 +81,42 @@
       "works_apc_bearing": 12276,
       "works_priced": 10287,
       "match_rate": 0.838
+    }
+  },
+  "by_oa_status": {
+    "gold": {
+      "usd": 86007961,
+      "thb": 2924270674
+    },
+    "hybrid": {
+      "usd": 13784220,
+      "thb": 468663480
+    },
+    "by_year": {
+      "2020": {
+        "gold": 7888387,
+        "hybrid": 971343
+      },
+      "2021": {
+        "gold": 12280859,
+        "hybrid": 1151822
+      },
+      "2022": {
+        "gold": 16027078,
+        "hybrid": 1649037
+      },
+      "2023": {
+        "gold": 14612248,
+        "hybrid": 2197494
+      },
+      "2024": {
+        "gold": 15585189,
+        "hybrid": 3432733
+      },
+      "2025": {
+        "gold": 19614200,
+        "hybrid": 4381791
+      }
     }
   },
   "by_publisher": [
@@ -25420,7 +25456,7 @@
     "Figures are an estimated list-price ceiling, not actual spend. Transformative/read-and-publish agreements, institutional memberships, and negotiated discounts reduce real outlay.",
     "Only Gold and Hybrid open access works incur an APC; Diamond, Green, Bronze, and Closed works are excluded.",
     "Attribution is by corresponding author. Works with no flagged corresponding author fall back to the first author.",
-    "Each publisher row is labelled with how it was priced: \"by ISSN\" (most precise), \"by title\", or \"flat rate\" (a publisher-wide default, e.g. ACS/RSC/Emerald). Title and flat-rate figures are estimates, not exact per-journal prices.",
-    "Prices given only in GBP or EUR are converted to USD at fixed documented rates; THB uses per-year averages. See currency."
+    "Each publisher row is labelled with how it was priced: by ISSN (most precise), by title, or flat rate (a publisher-wide default such as ACS/RSC/Emerald). Title and flat-rate figures are estimates, not exact per-journal prices.",
+    "When a filter is active the panel re-prices the exact selection live from OpenAlex; with no filter it shows these precomputed national totals."
   ]
 }
