@@ -3073,6 +3073,40 @@ const CountryRow = ({ c, active, onClick }) => (
 const fmtUSD = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
 const fmtTHB = (n) => '฿' + Math.round(n || 0).toLocaleString('en-US');
 
+// Collapsible dashboard section. Wraps a group of panels under a clickable
+// header that expands/collapses the group. Each section manages its own state.
+const CollapsibleSection = ({ title, subtitle, defaultOpen = true, children }) => {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className="mb-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="mb-4 flex w-full items-center gap-3 border-b pb-2 text-left"
+        style={{ borderColor: PALETTE.ink, background: 'transparent', cursor: 'pointer' }}
+      >
+        <ChevronDown
+          size={18}
+          style={{ flex: 'none', color: PALETTE.ink, transition: 'transform 0.2s ease', transform: open ? 'none' : 'rotate(-90deg)' }}
+        />
+        <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 24, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }}>
+          {title}
+        </span>
+        {subtitle && (
+          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.12em' }} className="uppercase">
+            {subtitle}
+          </span>
+        )}
+        <span style={{ marginLeft: 'auto', fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }} className="uppercase">
+          {open ? 'Hide' : 'Show'}
+        </span>
+      </button>
+      {open && children}
+    </section>
+  );
+};
+
 // Rank-over-time bump chart: each line is one entity's rank across the year
 // window. Used by the Publishing channels panel's "Rank over time" tab.
 const RankBumpChart = ({ rows, years, topN = 15, status, accentColor }) => {
@@ -4346,6 +4380,7 @@ export default function ResearchOutputDashboard() {
       </section>
 
       <main className="mx-auto max-w-[1400px] px-6 py-8">
+        <CollapsibleSection title="Publication Landscape" subtitle="Who and what">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
           <Card className="p-5 lg:col-span-12">
             <SectionTitle
@@ -4517,6 +4552,164 @@ export default function ResearchOutputDashboard() {
 
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
+              icon={FileText}
+              kicker="Output forms"
+              title="Document types"
+              count={panelN('docTypes')?.count}
+              countLabel="document types"
+            />
+            <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
+              <Donut
+                data={sliceFor('docTypes')}
+                height={260}
+                onSliceClick={onPick('docTypes')}
+                selectedKeys={selKeys('docTypes')}
+              />
+              <ChartControls
+                total={(state.docTypes?.data || []).length}
+                limit={limitFor('docTypes')}
+                onLimitChange={setLimit('docTypes')}
+                onOpenTable={() => setTableOpenDim('docTypes')}
+                options={[5, 7, 10]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Languages}
+              kicker="Language of record"
+              title="Publication languages"
+              count={panelN('languages')?.count}
+              countLabel="languages"
+            />
+            <ChartFrame status={state.languages?.status} error={state.languages?.error}>
+              <Donut
+                data={sliceFor('languages')}
+                height={260}
+                onSliceClick={onPick('languages')}
+                selectedKeys={selKeys('languages')}
+              />
+              <ChartControls
+                total={(state.languages?.data || []).length}
+                limit={limitFor('languages')}
+                onLimitChange={setLimit('languages')}
+                onOpenTable={() => setTableOpenDim('languages')}
+                options={[5, 8, 12]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Globe2}
+              kicker="Co-authorship reach"
+              title="International collaborators"
+              hint={`${countryName(country)} excluded from list`}
+              count={panelN('collaborators')?.count}
+              countLabel={panelN('collaborators')?.truncated ? 'co-author countries · capped at 200' : 'co-author countries'}
+            />
+            <ChartFrame
+              status={state.collaborators?.status}
+              error={state.collaborators?.error}
+              hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
+            >
+              <HBar
+                data={sliceFor('collaborators')}
+                color={PALETTE.plum}
+                onBarClick={onPick('collaborators')}
+                selectedKeys={selKeys('collaborators')}
+              />
+              <ChartControls
+                total={(state.collaborators?.data || []).length}
+                limit={limitFor('collaborators')}
+                onLimitChange={setLimit('collaborators')}
+                onOpenTable={() => setTableOpenDim('collaborators')}
+              />
+              {state.domesticCount?.status === 'ready' && totalCount ? (
+                <div
+                  className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
+                  style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
+                >
+                  <span
+                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                    className="uppercase"
+                  >
+                    Domestic-only
+                  </span>
+                  <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+                    <strong style={{ color: PALETTE.ink, fontFamily: FONT_MONO }}>
+                      {fmtFull(state.domesticCount.data)}
+                    </strong>{' '}
+                    works ({pct(state.domesticCount.data, totalCount)}) involve {countryName(country)} authors only — no
+                    international co-authors.
+                  </span>
+                </div>
+              ) : null}
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Target}
+              kicker="Mission alignment"
+              title="UN Sustainable Development Goals"
+              hint="OpenAlex SDG classifier"
+              count={panelN('sdgs')?.count}
+              countLabel="SDGs covered"
+            />
+            <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
+              <HBar
+                data={sliceFor('sdgs')}
+                color={PALETTE.gold}
+                onBarClick={onPick('sdgs')}
+                selectedKeys={selKeys('sdgs')}
+              />
+              <ChartControls
+                total={(state.sdgs?.data || []).length}
+                limit={limitFor('sdgs')}
+                onLimitChange={setLimit('sdgs')}
+                onOpenTable={() => setTableOpenDim('sdgs')}
+                options={[10, 14, 17]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Banknote}
+              kicker="Funding landscape"
+              title="Acknowledged funders"
+              hint="From grants metadata; coverage is partial"
+              count={panelN('funders')?.count}
+              countLabel={panelN('funders')?.truncated ? 'funders shown · capped at 200' : 'distinct funders'}
+            />
+            <ChartFrame
+              status={state.funders?.status}
+              error={state.funders?.error}
+              hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
+            >
+              <HBar
+                data={sliceFor('funders')}
+                color={PALETTE.rust}
+                onBarClick={onPick('funders')}
+                selectedKeys={selKeys('funders')}
+              />
+              <ChartControls
+                total={(state.funders?.data || []).length}
+                limit={limitFor('funders')}
+                onLimitChange={setLimit('funders')}
+                onOpenTable={() => setTableOpenDim('funders')}
+              />
+            </ChartFrame>
+          </Card>
+        </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Publishing" subtitle="Where and how much">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
               icon={BookOpen}
               kicker="Access regime"
               title="Open access pathways"
@@ -4623,7 +4816,11 @@ export default function ResearchOutputDashboard() {
                 : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
             }
           />
+        </div>
+        </CollapsibleSection>
 
+        <CollapsibleSection title="Visibility" subtitle="Reach and impact">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
           {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
               years for comparison; in multi-year mode shows just the aggregate. */}
           <Card className="p-5 lg:col-span-12">
@@ -4700,7 +4897,7 @@ export default function ResearchOutputDashboard() {
             <SectionTitle
               icon={TrendingUp}
               kicker="Visibility"
-              title="Most-cited works in selection"
+              title="Prominent works"
               hint="Live ranking; very recent works under-cite"
               count={state.topWorks?.data ? state.topWorks.data.length : null}
               countLabel="top works ranked"
@@ -4777,162 +4974,8 @@ export default function ResearchOutputDashboard() {
               </ol>
             </ChartFrame>
           </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={FileText}
-              kicker="Output forms"
-              title="Document types"
-              count={panelN('docTypes')?.count}
-              countLabel="document types"
-            />
-            <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
-              <Donut
-                data={sliceFor('docTypes')}
-                height={260}
-                onSliceClick={onPick('docTypes')}
-                selectedKeys={selKeys('docTypes')}
-              />
-              <ChartControls
-                total={(state.docTypes?.data || []).length}
-                limit={limitFor('docTypes')}
-                onLimitChange={setLimit('docTypes')}
-                onOpenTable={() => setTableOpenDim('docTypes')}
-                options={[5, 7, 10]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Languages}
-              kicker="Language of record"
-              title="Publication languages"
-              count={panelN('languages')?.count}
-              countLabel="languages"
-            />
-            <ChartFrame status={state.languages?.status} error={state.languages?.error}>
-              <Donut
-                data={sliceFor('languages')}
-                height={260}
-                onSliceClick={onPick('languages')}
-                selectedKeys={selKeys('languages')}
-              />
-              <ChartControls
-                total={(state.languages?.data || []).length}
-                limit={limitFor('languages')}
-                onLimitChange={setLimit('languages')}
-                onOpenTable={() => setTableOpenDim('languages')}
-                options={[5, 8, 12]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Globe2}
-              kicker="Co-authorship reach"
-              title="International collaborators"
-              hint={`${countryName(country)} excluded from list`}
-              count={panelN('collaborators')?.count}
-              countLabel={panelN('collaborators')?.truncated ? 'co-author countries · capped at 200' : 'co-author countries'}
-            />
-            <ChartFrame
-              status={state.collaborators?.status}
-              error={state.collaborators?.error}
-              hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
-            >
-              <HBar
-                data={sliceFor('collaborators')}
-                color={PALETTE.plum}
-                onBarClick={onPick('collaborators')}
-                selectedKeys={selKeys('collaborators')}
-              />
-              <ChartControls
-                total={(state.collaborators?.data || []).length}
-                limit={limitFor('collaborators')}
-                onLimitChange={setLimit('collaborators')}
-                onOpenTable={() => setTableOpenDim('collaborators')}
-              />
-              {/* Domestic-collaboration summary */}
-              {state.domesticCount?.status === 'ready' && totalCount ? (
-                <div
-                  className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
-                  style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
-                >
-                  <span
-                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
-                    className="uppercase"
-                  >
-                    Domestic-only
-                  </span>
-                  <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-                    <strong style={{ color: PALETTE.ink, fontFamily: FONT_MONO }}>
-                      {fmtFull(state.domesticCount.data)}
-                    </strong>{' '}
-                    works ({pct(state.domesticCount.data, totalCount)}) involve {countryName(country)} authors only — no
-                    international co-authors.
-                  </span>
-                </div>
-              ) : null}
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Target}
-              kicker="Mission alignment"
-              title="UN Sustainable Development Goals"
-              hint="OpenAlex SDG classifier"
-              count={panelN('sdgs')?.count}
-              countLabel="SDGs covered"
-            />
-            <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
-              <HBar
-                data={sliceFor('sdgs')}
-                color={PALETTE.gold}
-                onBarClick={onPick('sdgs')}
-                selectedKeys={selKeys('sdgs')}
-              />
-              <ChartControls
-                total={(state.sdgs?.data || []).length}
-                limit={limitFor('sdgs')}
-                onLimitChange={setLimit('sdgs')}
-                onOpenTable={() => setTableOpenDim('sdgs')}
-                options={[10, 14, 17]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Banknote}
-              kicker="Funding landscape"
-              title="Acknowledged funders"
-              hint="From grants metadata; coverage is partial"
-              count={panelN('funders')?.count}
-              countLabel={panelN('funders')?.truncated ? 'funders shown · capped at 200' : 'distinct funders'}
-            />
-            <ChartFrame
-              status={state.funders?.status}
-              error={state.funders?.error}
-              hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
-            >
-              <HBar
-                data={sliceFor('funders')}
-                color={PALETTE.rust}
-                onBarClick={onPick('funders')}
-                selectedKeys={selKeys('funders')}
-              />
-              <ChartControls
-                total={(state.funders?.data || []).length}
-                limit={limitFor('funders')}
-                onLimitChange={setLimit('funders')}
-                onOpenTable={() => setTableOpenDim('funders')}
-              />
-            </ChartFrame>
-          </Card>
         </div>
+        </CollapsibleSection>
 
         <Card className="mt-6 p-6">
           <SectionTitle icon={Database} kicker="Methods & caveats" title="On reading these numbers" />
