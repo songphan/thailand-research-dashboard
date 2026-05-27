@@ -9,6 +9,10 @@ import {
   Table as TableIcon, Download, Search, ChevronDown
 } from 'lucide-react';
 
+import apcData from './data/apc_by_publisher.json';
+import apcPricing from './data/apc_pricing.json';
+import publisherDefaults from './data/publisher_defaults.json';
+
 const OPENALEX_BASE = 'https://api.openalex.org';
 
 // OpenAlex API key. As of Feb 13, 2026, OpenAlex made API keys mandatory and
@@ -73,10 +77,6 @@ const YEARS = [2025, 2024, 2023, 2022, 2021, 2020];
 // To add a new exclusion: add the full OpenAlex institution URL to the array
 // for the relevant country. The id should match the `id` field returned by
 // /institutions, which is the form `https://openalex.org/I123456789`.
-//
-// To verify a suspect institution before adding it here, open the institution
-// in OpenAlex Explorer, view a few of its top-cited recent works, and confirm
-// that the work's authorships have no authors with the expected country code.
 const EXCLUDED_INSTITUTIONS_BY_COUNTRY = {
   TH: new Set([
     // Ministry of Education (https://ror.org/036nq5137, www.en.moe.go.th).
@@ -1830,270 +1830,7 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
   );
 };
 
-// Bump chart for showing how the rank of a set of entities (publishers, etc.)
-// changes across a sequence of years. Each entity is one line that traces its
-// rank position from left to right. Lines that cross indicate one entity
-// overtaking another; lines that move sharply up or down indicate volatility.
-//
-// Input shape: rows = [
-//   { key, label, ranks: { 2021: 3, 2022: 5, 2023: 4, ... }, counts: { 2021: 1200, ... } },
-//   ...
-// ]
-// years = sorted array of years to plot (left to right).
-// Entities missing a rank for a given year are drawn with a faded segment to
-// the nearest known rank.
-const RankBumpChart = ({ rows, years, topN = 15, status, accentColor }) => {
-  const W = 720;
-  const H = 360;
-  const PAD = { top: 28, right: 220, bottom: 36, left: 36 };
-  const plotW = W - PAD.left - PAD.right;
-  const plotH = H - PAD.top - PAD.bottom;
-  const [hover, setHover] = React.useState(null);
-
-  if (status === 'loading') {
-    return (
-      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
-        <Loader2 size={14} className="animate-spin" />
-        <span className="ml-2">Computing rank trajectories…</span>
-      </div>
-    );
-  }
-  if (status === 'error') {
-    return (
-      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
-        Could not load rank data.
-      </div>
-    );
-  }
-  if (!rows || rows.length === 0 || !years || years.length === 0) {
-    return (
-      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
-        Not enough data to build a rank chart.
-      </div>
-    );
-  }
-
-  // X positions: one per year, equally spaced.
-  const xFor = (year) => {
-    if (years.length === 1) return PAD.left + plotW / 2;
-    const idx = years.indexOf(year);
-    return PAD.left + (idx / (years.length - 1)) * plotW;
-  };
-  // Y positions: rank 1 at top, rank topN at bottom.
-  const yFor = (rank) => PAD.top + ((rank - 1) / Math.max(1, topN - 1)) * plotH;
-
-  // Color encoding: sequential palette based on the entity's rank in the
-  // most recent year. The top-ranked publisher gets the warmest accent;
-  // those further down get cooler shades. This makes "where is this
-  // publisher now" visually clear at a glance.
-  const lastYear = years[years.length - 1];
-  // Sort rows by their rank in lastYear (entities with no last-year rank go to
-  // the end). Then assign colors by position in this sorted list.
-  const sortedByLast = [...rows].sort((a, b) => {
-    const ra = a.ranks[lastYear] ?? Infinity;
-    const rb = b.ranks[lastYear] ?? Infinity;
-    return ra - rb;
-  });
-  // 15-step palette from rust → teal, perceptually distinct.
-  const colorRamp = [
-    '#a04f1f', '#b56423', '#c87c30', '#cb8d4a', '#c69a64',
-    '#a89878', '#888a82', '#6e8488', '#577e8e', '#477694',
-    '#3a6f93', '#2f6890', '#2c5f7d', '#2b5469', '#2c4a55',
-  ];
-  const colorFor = (key) => {
-    const idx = sortedByLast.findIndex((r) => r.key === key);
-    if (idx < 0) return PALETTE.muted;
-    return colorRamp[Math.min(idx, colorRamp.length - 1)];
-  };
-
-  return (
-    <div className="relative" style={{ width: '100%' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
-        {/* Y axis: rank position guides at every 3 ranks */}
-        {[1, 5, 10, 15].filter((r) => r <= topN).map((r) => (
-          <g key={`y-${r}`}>
-            <line
-              x1={PAD.left} x2={W - PAD.right}
-              y1={yFor(r)} y2={yFor(r)}
-              stroke={PALETTE.rule}
-              strokeDasharray="2 4"
-            />
-            <text
-              x={PAD.left - 6} y={yFor(r) + 3}
-              textAnchor="end"
-              style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}
-            >
-              #{r}
-            </text>
-          </g>
-        ))}
-        {/* X axis: year labels */}
-        {years.map((y) => (
-          <g key={`x-${y}`}>
-            <text
-              x={xFor(y)} y={PAD.top - 10}
-              textAnchor="middle"
-              style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.04em', fill: PALETTE.charcoal, fontWeight: 500 }}
-            >
-              {y}
-            </text>
-            <line
-              x1={xFor(y)} x2={xFor(y)}
-              y1={PAD.top} y2={H - PAD.bottom}
-              stroke={PALETTE.rule}
-              strokeDasharray="1 5"
-              opacity="0.4"
-            />
-          </g>
-        ))}
-        {/* Axis title */}
-        <text
-          x={14} y={PAD.top + plotH / 2}
-          textAnchor="middle"
-          transform={`rotate(-90, 14, ${PAD.top + plotH / 2})`}
-          style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
-        >
-          RANK
-        </text>
-        {/* Lines: one per entity. Each segment connects (year, rank) → (next year, rank). */}
-        {sortedByLast.map((row) => {
-          const segments = [];
-          for (let i = 0; i < years.length - 1; i++) {
-            const y1 = years[i];
-            const y2 = years[i + 1];
-            const r1 = row.ranks[y1];
-            const r2 = row.ranks[y2];
-            if (r1 == null || r2 == null) {
-              // One side is missing: draw a faded segment that still shows
-              // the existing endpoint, jumping from the topN+1 "off-chart"
-              // position to the known rank or vice versa.
-              const fakeR1 = r1 ?? topN + 1;
-              const fakeR2 = r2 ?? topN + 1;
-              segments.push({
-                x1: xFor(y1), y1: yFor(fakeR1),
-                x2: xFor(y2), y2: yFor(fakeR2),
-                faded: true,
-              });
-            } else {
-              segments.push({
-                x1: xFor(y1), y1: yFor(r1),
-                x2: xFor(y2), y2: yFor(r2),
-                faded: false,
-              });
-            }
-          }
-          const color = colorFor(row.key);
-          const isHovered = hover && hover.key === row.key;
-          return (
-            <g
-              key={row.key}
-              onMouseEnter={() => setHover(row)}
-              onMouseLeave={() => setHover(null)}
-              style={{ cursor: 'pointer' }}
-            >
-              {/* Wider invisible hitbox for easier hovering */}
-              {segments.map((s, i) => (
-                <line
-                  key={`hit-${i}`}
-                  x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
-                  stroke="transparent" strokeWidth="14"
-                />
-              ))}
-              {/* Visible line segments */}
-              {segments.map((s, i) => (
-                <line
-                  key={`line-${i}`}
-                  x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
-                  stroke={color}
-                  strokeWidth={isHovered ? 3 : 2}
-                  strokeOpacity={s.faded ? 0.25 : (hover && !isHovered ? 0.25 : 0.85)}
-                  strokeLinecap="round"
-                />
-              ))}
-              {/* Dots at each known data point */}
-              {years.map((y) => {
-                const r = row.ranks[y];
-                if (r == null) return null;
-                return (
-                  <circle
-                    key={`pt-${y}`}
-                    cx={xFor(y)} cy={yFor(r)}
-                    r={isHovered ? 4.5 : 3}
-                    fill={color}
-                    stroke={PALETTE.paper}
-                    strokeWidth="1.2"
-                    fillOpacity={hover && !isHovered ? 0.35 : 1}
-                  />
-                );
-              })}
-              {/* Right-side label for the entity, at the last known rank */}
-              {(() => {
-                // Find the last known rank to anchor the label.
-                let labelYear = null;
-                for (let i = years.length - 1; i >= 0; i--) {
-                  if (row.ranks[years[i]] != null) {
-                    labelYear = years[i];
-                    break;
-                  }
-                }
-                if (labelYear == null) return null;
-                const r = row.ranks[labelYear];
-                return (
-                  <text
-                    x={W - PAD.right + 10}
-                    y={yFor(r) + 3}
-                    style={{
-                      fontFamily: FONT_BODY,
-                      fontSize: isHovered ? 12 : 11,
-                      fill: hover && !isHovered ? PALETTE.muted : PALETTE.ink,
-                      fontWeight: isHovered ? 600 : 400,
-                    }}
-                  >
-                    {row.label.length > 28 ? row.label.slice(0, 27) + '…' : row.label}
-                  </text>
-                );
-              })()}
-            </g>
-          );
-        })}
-      </svg>
-      {/* Tooltip */}
-      {hover && (
-        <div
-          className="pointer-events-none absolute rounded-sm px-3 py-2"
-          style={{
-            background: PALETTE.ink,
-            color: PALETTE.cream,
-            fontFamily: FONT_BODY,
-            fontSize: 11.5,
-            lineHeight: 1.45,
-            border: `1px solid ${PALETTE.ink}`,
-            boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
-            top: 8,
-            right: 8,
-            maxWidth: 300,
-          }}
-        >
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>{hover.label}</div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, opacity: 0.9 }}>
-            {years.map((y) => {
-              const r = hover.ranks[y];
-              const c = hover.counts[y];
-              return (
-                <div key={y}>
-                  {y}: {r != null ? `#${r}` : '—'}
-                  {c != null && <span style={{ opacity: 0.7 }}> ({fmtFull(c)} works)</span>}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-
+// Citation insight section showing top institutions, fields, subfields,
 // publishers, and international-collaborator countries for the cited or
 // uncited subset of the active selection. The reader picks the mode
 // (cited or uncited) and the ranking metric (within-entity percentage,
@@ -3320,6 +3057,447 @@ const CountryRow = ({ c, active, onClick }) => (
   </button>
 );
 
+// ---------------------------------------------------------------------------
+// APC (Article Processing Charge) spend panel.
+//
+// Reads the precomputed apc_by_publisher.json (produced offline by
+// apc-pipeline/precompute_apc.mjs) and shows estimated national open-access
+// fees by publisher for the years currently selected in the masthead. The
+// figure is a LIST-PRICE CEILING attributed to Thai corresponding authors, not
+// actual spend. See the methods note in the panel and apc-pipeline/README.md.
+//
+// This panel is intentionally decoupled from the live OpenAlex panels: summing
+// APC requires per-work iteration that OpenAlex's group_by cannot do, so the
+// heavy lifting happens in the offline pipeline and this panel just renders the
+// result, refiltered by the selected years.
+const fmtUSD = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
+const fmtTHB = (n) => '฿' + Math.round(n || 0).toLocaleString('en-US');
+
+// Rank-over-time bump chart: each line is one entity's rank across the year
+// window. Used by the Publishing channels panel's "Rank over time" tab.
+const RankBumpChart = ({ rows, years, topN = 15, status, accentColor }) => {
+  const W = 720;
+  const H = 360;
+  const PAD = { top: 28, right: 220, bottom: 36, left: 36 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+  const [hover, setHover] = React.useState(null);
+
+  if (status === 'loading') {
+    return (
+      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+        <Loader2 size={14} className="animate-spin" />
+        <span className="ml-2">Computing rank trajectories…</span>
+      </div>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
+        Could not load rank data.
+      </div>
+    );
+  }
+  if (!rows || rows.length === 0 || !years || years.length === 0) {
+    return (
+      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+        Not enough data to build a rank chart.
+      </div>
+    );
+  }
+
+  const xFor = (year) => {
+    if (years.length === 1) return PAD.left + plotW / 2;
+    const idx = years.indexOf(year);
+    return PAD.left + (idx / (years.length - 1)) * plotW;
+  };
+  const yFor = (rank) => PAD.top + ((rank - 1) / Math.max(1, topN - 1)) * plotH;
+
+  const lastYear = years[years.length - 1];
+  const sortedByLast = [...rows].sort((a, b) => {
+    const ra = a.ranks[lastYear] ?? Infinity;
+    const rb = b.ranks[lastYear] ?? Infinity;
+    return ra - rb;
+  });
+  const colorRamp = [
+    '#a04f1f', '#b56423', '#c87c30', '#cb8d4a', '#c69a64',
+    '#a89878', '#888a82', '#6e8488', '#577e8e', '#477694',
+    '#3a6f93', '#2f6890', '#2c5f7d', '#2b5469', '#2c4a55',
+  ];
+  const colorFor = (key) => {
+    const idx = sortedByLast.findIndex((r) => r.key === key);
+    if (idx < 0) return PALETTE.muted;
+    return colorRamp[Math.min(idx, colorRamp.length - 1)];
+  };
+
+  return (
+    <div className="relative" style={{ width: '100%' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+        {[1, 5, 10, 15].filter((r) => r <= topN).map((r) => (
+          <g key={`y-${r}`}>
+            <line x1={PAD.left} x2={W - PAD.right} y1={yFor(r)} y2={yFor(r)} stroke={PALETTE.rule} strokeDasharray="2 4" />
+            <text x={PAD.left - 6} y={yFor(r) + 3} textAnchor="end" style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}>#{r}</text>
+          </g>
+        ))}
+        {years.map((y) => (
+          <g key={`x-${y}`}>
+            <text x={xFor(y)} y={PAD.top - 10} textAnchor="middle" style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.04em', fill: PALETTE.charcoal, fontWeight: 500 }}>{y}</text>
+            <line x1={xFor(y)} x2={xFor(y)} y1={PAD.top} y2={H - PAD.bottom} stroke={PALETTE.rule} strokeDasharray="1 5" opacity="0.4" />
+          </g>
+        ))}
+        <text x={14} y={PAD.top + plotH / 2} textAnchor="middle" transform={`rotate(-90, 14, ${PAD.top + plotH / 2})`} style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}>RANK</text>
+        {sortedByLast.map((row) => {
+          const segments = [];
+          for (let i = 0; i < years.length - 1; i++) {
+            const y1 = years[i];
+            const y2 = years[i + 1];
+            const r1 = row.ranks[y1];
+            const r2 = row.ranks[y2];
+            if (r1 == null || r2 == null) {
+              const fakeR1 = r1 ?? topN + 1;
+              const fakeR2 = r2 ?? topN + 1;
+              segments.push({ x1: xFor(y1), y1: yFor(fakeR1), x2: xFor(y2), y2: yFor(fakeR2), faded: true });
+            } else {
+              segments.push({ x1: xFor(y1), y1: yFor(r1), x2: xFor(y2), y2: yFor(r2), faded: false });
+            }
+          }
+          const color = colorFor(row.key);
+          const isHovered = hover && hover.key === row.key;
+          return (
+            <g key={row.key} onMouseEnter={() => setHover(row)} onMouseLeave={() => setHover(null)} style={{ cursor: 'pointer' }}>
+              {segments.map((s, i) => (
+                <line key={`hit-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="transparent" strokeWidth="14" />
+              ))}
+              {segments.map((s, i) => (
+                <line key={`line-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={color} strokeWidth={isHovered ? 3 : 2} strokeOpacity={s.faded ? 0.25 : (hover && !isHovered ? 0.25 : 0.85)} strokeLinecap="round" />
+              ))}
+              {years.map((y) => {
+                const r = row.ranks[y];
+                if (r == null) return null;
+                return (
+                  <circle key={`pt-${y}`} cx={xFor(y)} cy={yFor(r)} r={isHovered ? 4.5 : 3} fill={color} stroke={PALETTE.paper} strokeWidth="1.2" fillOpacity={hover && !isHovered ? 0.35 : 1} />
+                );
+              })}
+              {(() => {
+                let labelYear = null;
+                for (let i = years.length - 1; i >= 0; i--) {
+                  if (row.ranks[years[i]] != null) { labelYear = years[i]; break; }
+                }
+                if (labelYear == null) return null;
+                const r = row.ranks[labelYear];
+                return (
+                  <text x={W - PAD.right + 10} y={yFor(r) + 3} style={{ fontFamily: FONT_BODY, fontSize: isHovered ? 12 : 11, fill: hover && !isHovered ? PALETTE.muted : PALETTE.ink, fontWeight: isHovered ? 600 : 400 }}>
+                    {row.label.length > 28 ? row.label.slice(0, 27) + '…' : row.label}
+                  </text>
+                );
+              })()}
+            </g>
+          );
+        })}
+      </svg>
+      {hover && (
+        <div className="pointer-events-none absolute rounded-sm px-3 py-2" style={{ background: PALETTE.ink, color: PALETTE.cream, fontFamily: FONT_BODY, fontSize: 11.5, lineHeight: 1.45, border: `1px solid ${PALETTE.ink}`, boxShadow: '0 4px 12px rgba(0,0,0,0.18)', top: 8, right: 8, maxWidth: 300 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{hover.label}</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, opacity: 0.9 }}>
+            {years.map((y) => {
+              const r = hover.ranks[y];
+              const c = hover.counts[y];
+              return (
+                <div key={y}>
+                  {y}: {r != null ? `#${r}` : '—'}
+                  {c != null && <span style={{ opacity: 0.7 }}> ({fmtFull(c)} works)</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// FX + client-side pricing helpers (mirror apc-pipeline/precompute_apc.mjs).
+const APC_GBP_USD = (apcData.currency && apcData.currency.gbp_usd) || 1.27;
+const APC_EUR_USD = (apcData.currency && apcData.currency.eur_usd) || 1.08;
+const APC_AVG_THB = 34.0;
+const APC_MAX_LIVE = 6000; // cap on works priced live per selection
+const apcStripIssn = (s) => (typeof s === 'string' ? s.toUpperCase().replace(/[^0-9X]/g, '') : '');
+const APC_STOP = /\b(the|a|an|of|and|for|in|on)\b/g;
+const apcNormTitle = (t) => {
+  if (!t) return null;
+  let s = String(t).toLowerCase().replace(/&/g, ' and ');
+  s = s.replace(/[^a-z0-9 ]+/g, ' ').replace(APC_STOP, ' ').replace(/\s+/g, ' ').trim();
+  return s || null;
+};
+const apcArrUsd = (a) => {
+  if (!a) return null;
+  if (a[0] != null) return a[0];
+  if (a[2] != null) return Math.round(a[2] * APC_GBP_USD);
+  if (a[1] != null) return Math.round(a[1] * APC_EUR_USD);
+  return null;
+};
+const apcObjUsd = (o) => {
+  if (!o) return null;
+  if (o.usd != null) return o.usd;
+  if (o.gbp != null) return Math.round(o.gbp * APC_GBP_USD);
+  if (o.eur != null) return Math.round(o.eur * APC_EUR_USD);
+  return null;
+};
+const apcDefaultsRe = (publisherDefaults || []).map((d) => ({ ...d, re: new RegExp(d.match, 'i') }));
+const apcPriceWork = (w) => {
+  const src = (w.primary_location && w.primary_location.source) || {};
+  const oa = (w.open_access && w.open_access.oa_status) || null;
+  const issns = [];
+  if (src.issn_l) issns.push(apcStripIssn(src.issn_l));
+  for (const i of (src.issn || [])) issns.push(apcStripIssn(i));
+  for (const n of issns) { const u = apcArrUsd(apcPricing.issn[n]); if (u != null) return u; }
+  const tn = apcNormTitle(src.display_name);
+  if (tn) { const u = apcArrUsd(apcPricing.title[tn]); if (u != null) return u; }
+  const host = src.host_organization_name || '';
+  for (const d of apcDefaultsRe) {
+    if (d.re.test(host)) {
+      const u = apcObjUsd(oa === 'gold' ? d.gold : oa === 'hybrid' ? d.hybrid : null);
+      if (u != null) return u;
+    }
+  }
+  if (w.apc_list && w.apc_list.value_usd != null) return w.apc_list.value_usd;
+  if (w.apc_paid && w.apc_paid.value_usd != null) return w.apc_paid.value_usd;
+  return null;
+};
+const apcThaiCorr = (authorships) => {
+  const isTH = (a) => (a.countries || []).includes('TH') || (a.institutions || []).some((i) => i.country_code === 'TH');
+  const corr = (authorships || []).filter((a) => a.is_corresponding);
+  if (corr.length) return corr.some(isTH);
+  const first = (authorships || []).find((a) => a.author_position === 'first') || (authorships || [])[0];
+  return first ? isTH(first) : false;
+};
+
+// Gold-vs-hybrid proportion bar.
+const OaSplit = ({ gold, hybrid }) => {
+  const tot = (gold || 0) + (hybrid || 0);
+  if (tot <= 0) return null;
+  const gp = (gold / tot) * 100, hp = (hybrid / tot) * 100;
+  return (
+    <div className="mb-5">
+      <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase mb-2">
+        Gold vs hybrid open access
+      </div>
+      <div className="flex w-full overflow-hidden" style={{ height: 26, borderRadius: 3, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ width: `${gp}%`, background: OA_COLORS.gold, display: 'flex', alignItems: 'center', justifyContent: 'center', color: PALETTE.ink, fontFamily: FONT_MONO, fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden' }}
+             title={`Gold: ${fmtUSD(gold)} (${gp.toFixed(1)}%)`}>
+          {gp > 12 ? `Gold ${gp.toFixed(0)}%` : ''}
+        </div>
+        <div style={{ width: `${hp}%`, background: OA_COLORS.hybrid, display: 'flex', alignItems: 'center', justifyContent: 'center', color: PALETTE.paper, fontFamily: FONT_MONO, fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden' }}
+             title={`Hybrid: ${fmtUSD(hybrid)} (${hp.toFixed(1)}%)`}>
+          {hp > 12 ? `Hybrid ${hp.toFixed(0)}%` : ''}
+        </div>
+      </div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">
+        Gold {fmtUSD(gold)} · Hybrid {fmtUSD(hybrid)}
+      </div>
+    </div>
+  );
+};
+
+const ApcPanel = ({ years, country, filters, instFilterIds }) => {
+  const apcReady = apcData && apcData.status !== 'placeholder' && (apcData.by_publisher || []).length > 0;
+  const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
+  const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
+  const filterActive = hasChips || hasInst;
+  const instTooMany = hasInst && instFilterIds.length > 90;
+
+  const usedYears = ((years || []).filter((y) => (apcData.years || []).includes(y)));
+  const yearsForNat = usedYears.length ? usedYears : (apcData.years || []);
+
+  // National precomputed view, summed over the selected years.
+  const national = useMemo(() => {
+    if (!apcReady) return null;
+    let tUsd = 0, tThb = 0, tWorks = 0, tPriced = 0, gold = 0, hybrid = 0;
+    const rows = (apcData.by_publisher || []).map((p) => {
+      let usd = 0, thb = 0, works = 0, priced = 0, g = 0, h = 0;
+      for (const y of yearsForNat) {
+        const cell = (p.by_year || {})[y] || (p.by_year || {})[String(y)];
+        if (cell) { usd += cell.usd || 0; thb += cell.thb || 0; works += cell.works || 0; priced += cell.priced || 0; g += cell.gold || 0; h += cell.hybrid || 0; }
+      }
+      tUsd += usd; tThb += thb; tWorks += works; tPriced += priced;
+      return { key: p.publisher, label: cleanLabel(p.publisher, 34), usd, works, priced, gold: g, hybrid: h, basis: p.basis };
+    }).filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
+    const oa = (apcData.by_oa_status && apcData.by_oa_status.by_year) || {};
+    for (const y of yearsForNat) { const c = oa[y] || oa[String(y)]; if (c) { gold += c.gold || 0; hybrid += c.hybrid || 0; } }
+    return { rows, totalUsd: tUsd, totalThb: tThb, totalWorks: tWorks, totalPriced: tPriced, gold, hybrid };
+  }, [apcReady, JSON.stringify(yearsForNat)]);
+
+  // Live view, computed from OpenAlex for the exact current selection.
+  const [live, setLive] = useState({ status: 'idle' });
+  useEffect(() => {
+    if (!filterActive) { setLive({ status: 'idle' }); return; }
+    if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        setLive({ status: 'loading' });
+        let filter = buildFilterString(country, years, filters) + ',open_access.oa_status:gold|hybrid';
+        if (hasInst) filter += ',authorships.institutions.id:' + instFilterIds.join('|');
+        const cj = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&per-page=1`));
+        const count = (cj.meta && cj.meta.count) || 0;
+        if (cancelled) return;
+        if (count > APC_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
+        const SEL = 'id,open_access,primary_location,authorships,apc_list,apc_paid';
+        const agg = {};
+        let usd = 0, works = 0, priced = 0, gold = 0, hybrid = 0;
+        // Fetch all pages in parallel. The selection is under the cap (< 10000),
+        // so OpenAlex numbered paging is valid and the pages don't need to run
+        // sequentially the way cursor paging does. The shared rate limiter still
+        // paces the sends, but no request waits on the previous one's response.
+        const pages = Math.min(50, Math.max(1, Math.ceil(count / 200)));
+        const pageResults = await Promise.all(
+          Array.from({ length: pages }, (_, i) =>
+            fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&page=${i + 1}`))
+              .then((j) => j.results || [])
+              .catch(() => []))
+        );
+        if (cancelled) return;
+        for (const res of pageResults) {
+          for (const w of res) {
+            if (!apcThaiCorr(w.authorships)) continue;
+            works++;
+            const oa = (w.open_access && w.open_access.oa_status) || null;
+            const src = (w.primary_location && w.primary_location.source) || {};
+            const pub = src.host_organization_name || 'Unknown / no publisher';
+            const p = apcPriceWork(w);
+            if (!agg[pub]) agg[pub] = { usd: 0, works: 0, priced: 0, gold: 0, hybrid: 0 };
+            agg[pub].works++;
+            if (p != null) {
+              priced++; usd += p; agg[pub].usd += p; agg[pub].priced++;
+              if (oa === 'gold') { gold += p; agg[pub].gold += p; } else if (oa === 'hybrid') { hybrid += p; agg[pub].hybrid += p; }
+            }
+          }
+        }
+        if (cancelled) return;
+        const rows = Object.entries(agg).map(([key, v]) => ({ key, label: cleanLabel(key, 34), usd: v.usd, works: v.works, priced: v.priced, gold: v.gold, hybrid: v.hybrid }))
+          .filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
+        setLive({ status: 'ready', totalUsd: usd, totalThb: usd * APC_AVG_THB, totalWorks: works, totalPriced: priced, gold, hybrid, rows });
+      } catch (e) {
+        if (!cancelled) setLive({ status: 'error', error: (e && e.message) || 'Live pricing failed' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
+
+  const header = (hint) => (
+    <SectionTitle icon={Banknote} kicker="Open access fees" title="Estimated APC spend by publisher" hint={hint} />
+  );
+  const wrap = (children) => <Card className="p-5 lg:col-span-12">{children}</Card>;
+
+  // Placeholder: no precompute and no active filter.
+  if (!apcReady && !filterActive) {
+    return wrap(<>
+      {header('Awaiting precompute')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
+        <p style={{ marginBottom: 8 }}>This panel shows estimated article processing charges paid to each publisher. The national data has not been computed yet.</p>
+        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>Run <strong>node apc-pipeline/precompute_apc.mjs</strong> with an OpenAlex API key, then reload. Filtering re-prices live.</p>
+      </div>
+    </>);
+  }
+
+  // Live status screens.
+  if (filterActive && live.status === 'loading') {
+    return wrap(<>{header('Live · pricing current selection…')}<div className="px-2 py-6"><SkeletonBars rows={6} /></div></>);
+  }
+  if (filterActive && live.status === 'toolarge') {
+    const msg = live.reason === 'inst'
+      ? `This institution-type selection spans too many institutions (${(instFilterIds || []).length}) to price live. Pick a narrower subtype or also select a discipline.`
+      : `This selection covers ${(live.count || 0).toLocaleString()} works, above the ${APC_MAX_LIVE.toLocaleString()} live-pricing cap. Narrow the filter (a specific institution, subfield, or fewer years) to price it live.`;
+    return wrap(<>{header('Selection too large for live pricing')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>{msg}</div>
+    </>);
+  }
+  if (filterActive && live.status === 'error') {
+    return wrap(<>{header('Live pricing unavailable')}
+      <div className="flex flex-col items-center justify-center px-4 py-10 text-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
+        <AlertCircle size={20} className="mb-2" />
+        <div style={{ fontSize: 13 }}>Could not price this selection live.</div>
+        <div style={{ fontSize: 11, color: PALETTE.muted, marginTop: 4 }}>{live.error}</div>
+      </div>
+    </>);
+  }
+
+  const v = filterActive ? (live.status === 'ready' ? live : null) : national;
+  if (!v) return wrap(<>{header('Open access fees')}<div className="px-2 py-6"><SkeletonBars rows={6} /></div></>);
+
+  const matchRate = v.totalWorks ? (v.totalPriced / v.totalWorks) : 0;
+  const yearLabel = yearsForNat.length === (apcData.years || []).length
+    ? `${Math.min(...yearsForNat)}–${Math.max(...yearsForNat)}` : yearsForNat.join(', ');
+  const hint = filterActive
+    ? `Live · current selection · ${yearLabel}`
+    : `National · precomputed · ${yearLabel}`;
+  const maxUsd = v.rows.length ? v.rows[0].usd : 1;
+  const TOP = 20;
+  const shown = v.rows.slice(0, TOP);
+
+  return wrap(<>
+    {header(hint)}
+    <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (USD)</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }} className="mt-2">{fmtUSD(v.totalUsd)}</div>
+      </div>
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (THB)</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.burgundy, lineHeight: 1.1 }} className="mt-2">{fmtTHB(v.totalThb)}</div>
+      </div>
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Price match rate</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.teal, lineHeight: 1.1 }} className="mt-2">{(matchRate * 100).toFixed(1)}%</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(v.totalPriced)} of {fmtFull(v.totalWorks)} APC-bearing works priced</div>
+      </div>
+    </div>
+
+    <OaSplit gold={v.gold} hybrid={v.hybrid} />
+
+    <div className="space-y-2">
+      {shown.map((r) => (
+        <div key={r.key} className="flex items-center gap-3">
+          <div style={{ width: 200, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.key}>{r.label}</div>
+          <div className="flex-1">
+            <div className="flex" style={{ height: 18, borderRadius: 2, overflow: 'hidden', width: `${Math.max(2, (r.usd / maxUsd) * 100)}%`, transition: 'width 0.4s ease' }}
+                 title={`${fmtUSD(r.usd)} (Gold ${fmtUSD(r.gold || 0)}, Hybrid ${fmtUSD(r.hybrid || 0)})`}>
+              <div style={{ width: `${r.usd ? ((r.gold || 0) / r.usd) * 100 : 0}%`, background: OA_COLORS.gold }} />
+              <div style={{ width: `${r.usd ? ((r.hybrid || 0) / r.usd) * 100 : 0}%`, background: OA_COLORS.hybrid }} />
+            </div>
+          </div>
+          <div style={{ width: 220, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, flex: 'none' }}>
+            {fmtUSD(r.usd)}
+            <span style={{ color: PALETTE.muted }}> · {r.priced}/{r.works}</span>
+            {r.basis && (
+              <span title="How this publisher was priced: by ISSN is most precise; by title and flat rate are estimates."
+                style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 2, fontSize: 9, letterSpacing: '0.04em', border: `1px solid ${PALETTE.rule}`, color: r.basis === 'by ISSN' ? PALETTE.teal : PALETTE.rust, background: PALETTE.cream }}>
+                {r.basis}
+              </span>
+            )}
+          </div>
+        </div>
+      ))}
+      {v.rows.length > TOP && (
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="pt-1">Showing top {TOP} of {v.rows.length} publishers by estimated spend.</div>
+      )}
+      {v.rows.length === 0 && (
+        <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-4">No priced open access works in this selection.</div>
+      )}
+    </div>
+
+    <div className="mt-5 rounded-sm px-4 py-3" style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }} className="uppercase mb-2">Method &amp; caveats</div>
+      <ul style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.6, listStyle: 'disc', paddingLeft: 18 }}>
+        {(apcData.caveats || []).map((c, i) => (<li key={i} style={{ marginBottom: 3 }}>{c}</li>))}
+      </ul>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-2">
+        {filterActive ? 'Live: priced from OpenAlex for the current selection (THB at an average rate).' : 'National: precomputed totals (THB at per-year rates).'} Prices from curated publisher lists plus OpenAlex apc_list/DOAJ.
+      </div>
+    </div>
+  </>);
+};
+
 export default function ResearchOutputDashboard() {
   useFonts();
 
@@ -3369,27 +3547,95 @@ export default function ResearchOutputDashboard() {
   const [instTypeFilter, setInstTypeFilter] = useState('all');
   const [instSubcategoryFilter, setInstSubcategoryFilter] = useState('all');
 
-  // Publishers panel view: 'top' (current bar chart) or 'time' (rank-over-time
-  // bump chart, only available in multi-year mode). The bump chart is lazy-
-  // loaded: when the user clicks the "Rank over time" tab the dashboard fires
-  // one group_by request per year for the 5-year window ending at the most
-  // recently selected year.
+  // Publishing-channels view: 'top' (bar chart) or 'time' (rank-over-time bump
+  // chart, only meaningful in multi-year mode). The bump chart is lazy-loaded.
   const [publisherView, setPublisherView] = useState('top');
-  // Cache for the rank-over-time data. Keyed by a stable signature of the
-  // dimensions that affect the result (country + filters + max year). On
-  // signature change the cache resets.
   const [publisherRankCache, setPublisherRankCache] = useState({
     status: 'idle', rows: [], years: [], signature: null,
   });
-
-  // If the user drops back to a single year, force the publisher panel back
-  // to the standard top-bar view since the time-series tab is no longer
-  // applicable. Otherwise they'd be stuck on a hidden tab.
+  // If the user drops back to a single year, force the publisher panel back to
+  // the standard bar view since the time-series tab is no longer applicable.
   useEffect(() => {
     if (years.length < 2 && publisherView !== 'top') {
       setPublisherView('top');
     }
   }, [years, publisherView]);
+  // Lazy-load the rank-over-time data when the "Rank over time" tab is active:
+  // one group_by request per year for the 5-year window ending at the max
+  // selected year. Cached by a signature of country + filters + max year.
+  useEffect(() => {
+    if (publisherView !== 'time') return;
+    if (years.length < 2) return;
+    const anchorYear = Math.max(...years);
+    const signature = JSON.stringify({
+      country,
+      anchorYear,
+      filters: Object.entries(filters || {})
+        .filter(([, v]) => v && v.length > 0)
+        .map(([k, v]) => [k, v.map((c) => c.value).sort()])
+        .sort(),
+    });
+    if (publisherRankCache.signature === signature) return;
+    if (publisherRankCache.status === 'loading') return;
+
+    let cancelled = false;
+    setPublisherRankCache({ status: 'loading', rows: [], years: [], signature });
+
+    const TIME_WINDOW = 5;
+    const windowYears = [];
+    for (let y = anchorYear - TIME_WINDOW + 1; y <= anchorYear; y++) windowYears.push(y);
+
+    const fetchYear = async (y) => {
+      const filterStr = buildFilterString(country, y, filters, 'publishers');
+      const url = withMailto(
+        `${OPENALEX_BASE}/works?filter=${filterStr}` +
+        `&group_by=primary_location.source.host_organization&per-page=30`
+      );
+      try {
+        const j = await fetchJson(url);
+        const items = (j.group_by || []).map((g, idx) => ({
+          key: g.key,
+          label: g.key_display_name || 'Unknown',
+          count: g.count || 0,
+          rank: idx + 1,
+        }));
+        return [y, items];
+      } catch {
+        return [y, null];
+      }
+    };
+
+    Promise.all(windowYears.map(fetchYear)).then((perYearResults) => {
+      if (cancelled) return;
+      const totalByKey = new Map();
+      const labelByKey = new Map();
+      for (const [, items] of perYearResults) {
+        if (!items) continue;
+        for (const it of items) {
+          totalByKey.set(it.key, (totalByKey.get(it.key) || 0) + it.count);
+          if (!labelByKey.has(it.key)) labelByKey.set(it.key, it.label);
+        }
+      }
+      const topKeys = [...totalByKey.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([k]) => k);
+      const rows = topKeys.map((key) => {
+        const ranks = {};
+        const counts = {};
+        for (const [year, items] of perYearResults) {
+          if (!items) continue;
+          const item = items.find((it) => it.key === key);
+          if (item) { ranks[year] = item.rank; counts[year] = item.count; }
+        }
+        return { key, label: labelByKey.get(key) || 'Unknown', ranks, counts };
+      });
+      setPublisherRankCache({ status: 'ready', rows, years: windowYears, signature });
+    }).catch((e) => {
+      if (cancelled) return;
+      setPublisherRankCache({ status: 'error', rows: [], years: [], signature, error: e.message });
+    });
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publisherView, country, years, JSON.stringify(filters)]);
 
   const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
@@ -3773,112 +4019,6 @@ export default function ResearchOutputDashboard() {
 
     return () => { cancelled = true; };
   }, [country, years, refreshKey]);
-
-  // Lazy fetcher for the Publishers rank-over-time bump chart. Fires only when
-  // the user has selected the time-series tab and the cache for the current
-  // (country, filters, anchor-year) signature is stale or empty.
-  //
-  // We fetch top publishers for each of the last 5 years up to the maximum
-  // year currently selected. Each call is one `group_by=primary_location...`
-  // request scoped to country + filter chips + that specific year. The chart
-  // shows the top 15 most-frequent publishers across the full 5-year window
-  // (union of each year's top 30, then ranked by 5-year total) and traces
-  // each publisher's rank position year by year.
-  useEffect(() => {
-    if (publisherView !== 'time') return;
-    if (years.length < 2) return;
-    const anchorYear = Math.max(...years);
-    // Cache signature: stable string capturing every input that affects the
-    // result. If unchanged, no refetch.
-    const signature = JSON.stringify({
-      country,
-      anchorYear,
-      filters: Object.entries(filters || {})
-        .filter(([, v]) => v && v.length > 0)
-        .map(([k, v]) => [k, v.map((c) => c.value).sort()])
-        .sort(),
-    });
-    if (publisherRankCache.signature === signature) return;
-    if (publisherRankCache.status === 'loading') return;
-
-    let cancelled = false;
-    setPublisherRankCache({ status: 'loading', rows: [], years: [], signature });
-
-    // Build the 5-year window ending at anchorYear.
-    const TIME_WINDOW = 5;
-    const windowYears = [];
-    for (let y = anchorYear - TIME_WINDOW + 1; y <= anchorYear; y++) {
-      windowYears.push(y);
-    }
-
-    // Fetch top publishers for one year, using the same filter base as the
-    // rest of the dashboard except with publication_year overridden to this
-    // single year. We use the existing buildFilterString helper for consistency
-    // with the publisher chip-filter logic.
-    const fetchYear = async (y) => {
-      const filterStr = buildFilterString(country, y, filters, 'publishers');
-      const url = withMailto(
-        `${OPENALEX_BASE}/works?filter=${filterStr}` +
-        `&group_by=primary_location.source.host_organization&per-page=30`
-      );
-      try {
-        const j = await fetchJson(url);
-        // Map of publisher_id → { label, count } for this year, in count order.
-        const items = (j.group_by || []).map((g, idx) => ({
-          key: g.key,
-          label: g.key_display_name || 'Unknown',
-          count: g.count || 0,
-          rank: idx + 1,
-        }));
-        return [y, items];
-      } catch {
-        return [y, null];
-      }
-    };
-
-    Promise.all(windowYears.map(fetchYear)).then((perYearResults) => {
-      if (cancelled) return;
-      // Aggregate: union the top-30 from each year, then pick the top-15 by
-      // 5-year total (publishers that appear consistently rank above those
-      // that appeared once with a big spike).
-      const totalByKey = new Map();
-      const labelByKey = new Map();
-      for (const [, items] of perYearResults) {
-        if (!items) continue;
-        for (const it of items) {
-          totalByKey.set(it.key, (totalByKey.get(it.key) || 0) + it.count);
-          if (!labelByKey.has(it.key)) labelByKey.set(it.key, it.label);
-        }
-      }
-      const topKeys = [...totalByKey.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 15)
-        .map(([k]) => k);
-
-      // For each chosen publisher, collect its year-by-year rank and count.
-      const rows = topKeys.map((key) => {
-        const ranks = {};
-        const counts = {};
-        for (const [year, items] of perYearResults) {
-          if (!items) continue;
-          const item = items.find((it) => it.key === key);
-          if (item) {
-            ranks[year] = item.rank;
-            counts[year] = item.count;
-          }
-        }
-        return { key, label: labelByKey.get(key) || 'Unknown', ranks, counts };
-      });
-
-      setPublisherRankCache({ status: 'ready', rows, years: windowYears, signature });
-    }).catch((e) => {
-      if (cancelled) return;
-      setPublisherRankCache({ status: 'error', rows: [], years: [], signature, error: e.message });
-    });
-
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [publisherView, country, years, JSON.stringify(filters)]);
 
   const selKeys = (dim) => (filters[dim] || []).map((f) => f.value);
 
@@ -4375,32 +4515,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-4">
-            <SectionTitle
-              icon={FileText}
-              kicker="Output forms"
-              title="Document types"
-              count={panelN('docTypes')?.count}
-              countLabel="document types"
-            />
-            <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
-              <Donut
-                data={sliceFor('docTypes')}
-                height={260}
-                onSliceClick={onPick('docTypes')}
-                selectedKeys={selKeys('docTypes')}
-              />
-              <ChartControls
-                total={(state.docTypes?.data || []).length}
-                limit={limitFor('docTypes')}
-                onLimitChange={setLimit('docTypes')}
-                onOpenTable={() => setTableOpenDim('docTypes')}
-                options={[5, 7, 10]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-4">
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={BookOpen}
               kicker="Access regime"
@@ -4427,31 +4542,6 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-4">
-            <SectionTitle
-              icon={Languages}
-              kicker="Language of record"
-              title="Publication languages"
-              count={panelN('languages')?.count}
-              countLabel="languages"
-            />
-            <ChartFrame status={state.languages?.status} error={state.languages?.error}>
-              <Donut
-                data={sliceFor('languages')}
-                height={260}
-                onSliceClick={onPick('languages')}
-                selectedKeys={selKeys('languages')}
-              />
-              <ChartControls
-                total={(state.languages?.data || []).length}
-                limit={limitFor('languages')}
-                onLimitChange={setLimit('languages')}
-                onOpenTable={() => setTableOpenDim('languages')}
-                options={[5, 8, 12]}
-              />
-            </ChartFrame>
-          </Card>
-
           <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Newspaper}
@@ -4467,12 +4557,10 @@ export default function ResearchOutputDashboard() {
                 ? (panelN('publishers')?.truncated ? 'publishers shown · capped at 200' : 'distinct publishers')
                 : null}
             />
-            {/* View tabs: visible only when multi-year is engaged, since the
-                rank-over-time chart needs at least two years to be meaningful. */}
             {years.length >= 2 && (
               <div className="mb-3 flex flex-wrap items-center gap-1">
                 {[
-                  { key: 'top',  label: 'Top publishers' },
+                  { key: 'top', label: 'Top publishers' },
                   { key: 'time', label: 'Rank over time' },
                 ].map((tab) => {
                   const isActive = publisherView === tab.key;
@@ -4485,9 +4573,7 @@ export default function ResearchOutputDashboard() {
                         border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
                         background: isActive ? PALETTE.ink : 'transparent',
                         color: isActive ? PALETTE.cream : PALETTE.charcoal,
-                        fontFamily: FONT_MONO,
-                        fontSize: 11,
-                        letterSpacing: '0.03em',
+                        fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
                       }}
                     >
                       {tab.label}
@@ -4513,14 +4599,8 @@ export default function ResearchOutputDashboard() {
               </ChartFrame>
             ) : (
               <>
-                <p
-                  className="-mt-1 mb-3 max-w-3xl"
-                  style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.5 }}
-                >
-                  Each line traces one publisher's rank position across the 5-year window.
-                  Crossings indicate one publisher overtaking another; dramatic swings indicate volatility.
-                  Top-ranked publishers in the most recent year carry warmer colours.
-                  Hover a line for year-by-year ranks and counts.
+                <p className="-mt-1 mb-3 max-w-3xl" style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.5 }}>
+                  Each line traces one publisher's rank position across the 5-year window. Crossings indicate one publisher overtaking another; dramatic swings indicate volatility. Top-ranked publishers in the most recent year carry warmer colours. Hover a line for year-by-year ranks and counts.
                 </p>
                 <RankBumpChart
                   rows={publisherRankCache.rows}
@@ -4533,110 +4613,16 @@ export default function ResearchOutputDashboard() {
             )}
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Globe2}
-              kicker="Co-authorship reach"
-              title="International collaborators"
-              hint={`${countryName(country)} excluded from list`}
-              count={panelN('collaborators')?.count}
-              countLabel={panelN('collaborators')?.truncated ? 'co-author countries · capped at 200' : 'co-author countries'}
-            />
-            <ChartFrame
-              status={state.collaborators?.status}
-              error={state.collaborators?.error}
-              hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
-            >
-              <HBar
-                data={sliceFor('collaborators')}
-                color={PALETTE.plum}
-                onBarClick={onPick('collaborators')}
-                selectedKeys={selKeys('collaborators')}
-              />
-              <ChartControls
-                total={(state.collaborators?.data || []).length}
-                limit={limitFor('collaborators')}
-                onLimitChange={setLimit('collaborators')}
-                onOpenTable={() => setTableOpenDim('collaborators')}
-              />
-              {/* Domestic-collaboration summary */}
-              {state.domesticCount?.status === 'ready' && totalCount ? (
-                <div
-                  className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
-                  style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
-                >
-                  <span
-                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
-                    className="uppercase"
-                  >
-                    Domestic-only
-                  </span>
-                  <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-                    <strong style={{ color: PALETTE.ink, fontFamily: FONT_MONO }}>
-                      {fmtFull(state.domesticCount.data)}
-                    </strong>{' '}
-                    works ({pct(state.domesticCount.data, totalCount)}) involve {countryName(country)} authors only — no
-                    international co-authors.
-                  </span>
-                </div>
-              ) : null}
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Target}
-              kicker="Mission alignment"
-              title="UN Sustainable Development Goals"
-              hint="OpenAlex SDG classifier"
-              count={panelN('sdgs')?.count}
-              countLabel="SDGs covered"
-            />
-            <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
-              <HBar
-                data={sliceFor('sdgs')}
-                color={PALETTE.gold}
-                onBarClick={onPick('sdgs')}
-                selectedKeys={selKeys('sdgs')}
-              />
-              <ChartControls
-                total={(state.sdgs?.data || []).length}
-                limit={limitFor('sdgs')}
-                onLimitChange={setLimit('sdgs')}
-                onOpenTable={() => setTableOpenDim('sdgs')}
-                options={[10, 14, 17]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6">
-            <SectionTitle
-              icon={Banknote}
-              kicker="Funding landscape"
-              title="Acknowledged funders"
-              hint="From grants metadata; coverage is partial"
-              count={panelN('funders')?.count}
-              countLabel={panelN('funders')?.truncated ? 'funders shown · capped at 200' : 'distinct funders'}
-            />
-            <ChartFrame
-              status={state.funders?.status}
-              error={state.funders?.error}
-              hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
-            >
-              <HBar
-                data={sliceFor('funders')}
-                color={PALETTE.rust}
-                onBarClick={onPick('funders')}
-                selectedKeys={selKeys('funders')}
-              />
-              <ChartControls
-                total={(state.funders?.data || []).length}
-                limit={limitFor('funders')}
-                onLimitChange={setLimit('funders')}
-                onOpenTable={() => setTableOpenDim('funders')}
-              />
-            </ChartFrame>
-          </Card>
+          <ApcPanel
+            years={years}
+            country={country}
+            filters={filters}
+            instFilterIds={
+              (instTypeFilter === 'all' && instSubcategoryFilter === 'all')
+                ? null
+                : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
+            }
+          />
 
           {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
               years for comparison; in multi-year mode shows just the aggregate. */}
@@ -4789,6 +4775,161 @@ export default function ResearchOutputDashboard() {
                   </li>
                 ))}
               </ol>
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={FileText}
+              kicker="Output forms"
+              title="Document types"
+              count={panelN('docTypes')?.count}
+              countLabel="document types"
+            />
+            <ChartFrame status={state.docTypes?.status} error={state.docTypes?.error}>
+              <Donut
+                data={sliceFor('docTypes')}
+                height={260}
+                onSliceClick={onPick('docTypes')}
+                selectedKeys={selKeys('docTypes')}
+              />
+              <ChartControls
+                total={(state.docTypes?.data || []).length}
+                limit={limitFor('docTypes')}
+                onLimitChange={setLimit('docTypes')}
+                onOpenTable={() => setTableOpenDim('docTypes')}
+                options={[5, 7, 10]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Languages}
+              kicker="Language of record"
+              title="Publication languages"
+              count={panelN('languages')?.count}
+              countLabel="languages"
+            />
+            <ChartFrame status={state.languages?.status} error={state.languages?.error}>
+              <Donut
+                data={sliceFor('languages')}
+                height={260}
+                onSliceClick={onPick('languages')}
+                selectedKeys={selKeys('languages')}
+              />
+              <ChartControls
+                total={(state.languages?.data || []).length}
+                limit={limitFor('languages')}
+                onLimitChange={setLimit('languages')}
+                onOpenTable={() => setTableOpenDim('languages')}
+                options={[5, 8, 12]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Globe2}
+              kicker="Co-authorship reach"
+              title="International collaborators"
+              hint={`${countryName(country)} excluded from list`}
+              count={panelN('collaborators')?.count}
+              countLabel={panelN('collaborators')?.truncated ? 'co-author countries · capped at 200' : 'co-author countries'}
+            />
+            <ChartFrame
+              status={state.collaborators?.status}
+              error={state.collaborators?.error}
+              hint="A work appears in every co-author country it includes; numbers therefore exceed total works."
+            >
+              <HBar
+                data={sliceFor('collaborators')}
+                color={PALETTE.plum}
+                onBarClick={onPick('collaborators')}
+                selectedKeys={selKeys('collaborators')}
+              />
+              <ChartControls
+                total={(state.collaborators?.data || []).length}
+                limit={limitFor('collaborators')}
+                onLimitChange={setLimit('collaborators')}
+                onOpenTable={() => setTableOpenDim('collaborators')}
+              />
+              {/* Domestic-collaboration summary */}
+              {state.domesticCount?.status === 'ready' && totalCount ? (
+                <div
+                  className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
+                  style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}
+                >
+                  <span
+                    style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }}
+                    className="uppercase"
+                  >
+                    Domestic-only
+                  </span>
+                  <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+                    <strong style={{ color: PALETTE.ink, fontFamily: FONT_MONO }}>
+                      {fmtFull(state.domesticCount.data)}
+                    </strong>{' '}
+                    works ({pct(state.domesticCount.data, totalCount)}) involve {countryName(country)} authors only — no
+                    international co-authors.
+                  </span>
+                </div>
+              ) : null}
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Target}
+              kicker="Mission alignment"
+              title="UN Sustainable Development Goals"
+              hint="OpenAlex SDG classifier"
+              count={panelN('sdgs')?.count}
+              countLabel="SDGs covered"
+            />
+            <ChartFrame status={state.sdgs?.status} error={state.sdgs?.error}>
+              <HBar
+                data={sliceFor('sdgs')}
+                color={PALETTE.gold}
+                onBarClick={onPick('sdgs')}
+                selectedKeys={selKeys('sdgs')}
+              />
+              <ChartControls
+                total={(state.sdgs?.data || []).length}
+                limit={limitFor('sdgs')}
+                onLimitChange={setLimit('sdgs')}
+                onOpenTable={() => setTableOpenDim('sdgs')}
+                options={[10, 14, 17]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Banknote}
+              kicker="Funding landscape"
+              title="Acknowledged funders"
+              hint="From grants metadata; coverage is partial"
+              count={panelN('funders')?.count}
+              countLabel={panelN('funders')?.truncated ? 'funders shown · capped at 200' : 'distinct funders'}
+            />
+            <ChartFrame
+              status={state.funders?.status}
+              error={state.funders?.error}
+              hint="Many works lack funder metadata in Crossref; absence here does not mean absence of funding."
+            >
+              <HBar
+                data={sliceFor('funders')}
+                color={PALETTE.rust}
+                onBarClick={onPick('funders')}
+                selectedKeys={selKeys('funders')}
+              />
+              <ChartControls
+                total={(state.funders?.data || []).length}
+                limit={limitFor('funders')}
+                onLimitChange={setLimit('funders')}
+                onOpenTable={() => setTableOpenDim('funders')}
+              />
             </ChartFrame>
           </Card>
         </div>
