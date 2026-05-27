@@ -3364,6 +3364,9 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
   // Live view, computed from OpenAlex for the exact current selection.
   const [live, setLive] = useState({ status: 'idle' });
   useEffect(() => {
+    // APC estimation is calibrated for Thailand only, so never run live pricing
+    // for another country (it would mis-attribute via the Thai-author check).
+    if (country !== 'TH') { setLive({ status: 'idle' }); return; }
     if (!filterActive) { setLive({ status: 'idle' }); return; }
     if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
     let cancelled = false;
@@ -3422,6 +3425,22 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
     <SectionTitle icon={Banknote} kicker="Open access fees" title="Estimated APC spend by publisher" hint={hint} />
   );
   const wrap = (children) => <Card className="p-5 lg:col-span-12">{children}</Card>;
+
+  // Thailand only. The precomputed national totals are Thai, the
+  // corresponding-author attribution hardcodes TH, and the price reference
+  // reflects what Thai authors pay (Thailand is upper-middle-income, so no
+  // automatic LMIC waivers). For any other country we cannot produce a valid
+  // estimate, so we say so plainly rather than show Thailand's numbers or
+  // mis-attributed live pricing.
+  if (country !== 'TH') {
+    return wrap(<>
+      {header('Thailand only')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
+        <p style={{ marginBottom: 8 }}>APC spend estimation is available for Thailand only. The price reference and corresponding-author attribution were calibrated for {countryName('TH')}, so these figures would not be valid for {countryName(country)}.</p>
+        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.muted }}>Switch the country selector back to Thailand to see estimated open access fees.</p>
+      </div>
+    </>);
+  }
 
   // Placeholder: no precompute and no active filter.
   if (!apcReady && !filterActive) {
@@ -4015,6 +4034,27 @@ export default function ResearchOutputDashboard() {
           if (batch.length < 200) break;
         }
         if (cancelled) return;
+        // Sanity ceiling for outlier removal. An institution located in {country}
+        // cannot contribute more works to the national corpus than the corpus
+        // itself contains: every work it is affiliated to carries its own country
+        // code, so it is already inside the corpus. OpenAlex occasionally reports a
+        // grossly inflated counts_by_year for a mis-disambiguated institution (e.g.
+        // National Institute for Fusion Science for JP, where a single institution
+        // shows tens of millions of works against a ~600k national total). Fetching
+        // the corpus total lets us drop such institutions generically, without
+        // hardcoding each bad ID. A small tolerance absorbs minor counting drift.
+        let corpusCeiling = Infinity;
+        try {
+          const yearClause = `publication_year:${[...years].sort((a, b) => a - b).join('|')}`;
+          const totalFilter = `authorships.institutions.country_code:${country},${yearClause}`;
+          const tj = await fetchJson(countUrl(totalFilter));
+          const total = tj?.meta?.count ?? 0;
+          if (total > 0) corpusCeiling = total * 1.05;
+        } catch {
+          // If the total fetch fails, fall back to no ceiling rather than
+          // hiding legitimate institutions.
+        }
+        if (cancelled) return;
         const data = allInsts
           .map((inst) => {
             // Sum works_count across all selected years from the counts_by_year array.
@@ -4036,6 +4076,8 @@ export default function ResearchOutputDashboard() {
           .filter((d) => {
             // Standard checks: positive paper count and matching country code.
             if (d.value <= 0 || d.country !== country) return false;
+            // Drop inflated outliers that exceed the national corpus total.
+            if (d.value > corpusCeiling) return false;
             // Exclude known-misclassified institutions for this country
             // (data quality issue at OpenAlex; see comment near
             // EXCLUDED_INSTITUTIONS_BY_COUNTRY at top of file).
