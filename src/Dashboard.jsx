@@ -466,19 +466,57 @@ async function fetchAllGroups(filterStr, groupBy, maxPages = 8) {
   return all;
 }
 
-const Card = ({ children, className = '', style = {} }) => (
-  <div
-    className={`rounded-md ${className}`}
-    style={{
-      background: PALETTE.paper,
-      border: `1px solid ${PALETTE.rule}`,
-      boxShadow: '0 1px 0 rgba(26,22,18,0.03)',
-      ...style,
-    }}
-  >
-    {children}
-  </div>
-);
+// Card is a plain panel by default. Pass `collapsible` to turn the first child
+// (a SectionTitle header) into a clickable toggle that hides the rest of the
+// card body, so a chart box can be folded away to study how filtering one panel
+// affects the others. Opt-in only, so StatCard and the methods card stay fixed.
+const Card = ({ children, className = '', style = {}, collapsible = false, defaultOpen = true }) => {
+  const [open, setOpen] = useState(defaultOpen);
+  let inner = children;
+  if (collapsible) {
+    let kids = React.Children.toArray(children);
+    // ApcPanel and a few branches pass a single fragment; unwrap it so the
+    // header (the SectionTitle) is the first element rather than the fragment.
+    if (kids.length === 1 && kids[0] && kids[0].type === React.Fragment) {
+      kids = React.Children.toArray(kids[0].props.children);
+    }
+    const head = kids[0];
+    const body = kids.slice(1);
+    inner = (
+      <>
+        <div
+          role="button"
+          tabIndex={0}
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((o) => !o); } }}
+          title={open ? 'Collapse this box' : 'Expand this box'}
+          style={{ cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 8 }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>{head}</div>
+          <ChevronDown
+            size={16}
+            style={{ flex: 'none', marginTop: 2, color: PALETTE.muted, transition: 'transform 0.2s ease', transform: open ? 'none' : 'rotate(-90deg)' }}
+          />
+        </div>
+        {open && body}
+      </>
+    );
+  }
+  return (
+    <div
+      className={`rounded-md ${className}`}
+      style={{
+        background: PALETTE.paper,
+        border: `1px solid ${PALETTE.rule}`,
+        boxShadow: '0 1px 0 rgba(26,22,18,0.03)',
+        ...style,
+      }}
+    >
+      {inner}
+    </div>
+  );
+};
 
 const SectionTitle = ({ icon: Icon, kicker, title, hint, count, countLabel }) => (
   <div className="mb-4 flex items-start justify-between gap-3">
@@ -2210,7 +2248,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   };
 
   return (
-    <Card className="p-5 lg:col-span-12">
+    <Card className="p-5 lg:col-span-12" collapsible>
       <SectionTitle
         icon={Sparkles}
         kicker="Citation insight"
@@ -3424,7 +3462,7 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
   const header = (hint) => (
     <SectionTitle icon={Banknote} kicker="Open access fees" title="Estimated APC spend by publisher" hint={hint} />
   );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12">{children}</Card>;
+  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible>{children}</Card>;
 
   // Thailand only. The precomputed national totals are Thai, the
   // corresponding-author attribution hardcodes TH, and the price reference
@@ -4424,7 +4462,7 @@ export default function ResearchOutputDashboard() {
       <main className="mx-auto max-w-[1400px] px-6 py-8">
         <CollapsibleSection title="Publication Landscape" subtitle="Who and what">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-12">
+          <Card className="p-5 lg:col-span-12" collapsible>
             <SectionTitle
               icon={Building2}
               kicker="Producing institutions"
@@ -4542,7 +4580,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Layers}
               kicker="Disciplinary mix"
@@ -4567,7 +4605,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Sparkles}
               kicker="Granular topics"
@@ -4592,7 +4630,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={FileText}
               kicker="Output forms"
@@ -4617,7 +4655,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Languages}
               kicker="Language of record"
@@ -4642,7 +4680,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Globe2}
               kicker="Co-authorship reach"
@@ -4691,7 +4729,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Target}
               kicker="Mission alignment"
@@ -4717,7 +4755,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Banknote}
               kicker="Funding landscape"
@@ -4750,7 +4788,7 @@ export default function ResearchOutputDashboard() {
 
         <CollapsibleSection title="Publishing" subtitle="Where and how much">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={BookOpen}
               kicker="Access regime"
@@ -4777,7 +4815,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6">
+          <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Newspaper}
               kicker="Publishing channels"
@@ -4865,7 +4903,7 @@ export default function ResearchOutputDashboard() {
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
           {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
               years for comparison; in multi-year mode shows just the aggregate. */}
-          <Card className="p-5 lg:col-span-12">
+          <Card className="p-5 lg:col-span-12" collapsible>
             <SectionTitle
               icon={Sparkles}
               kicker="Citation reach"
@@ -4935,7 +4973,7 @@ export default function ResearchOutputDashboard() {
             activeFilters={filters}
           />
 
-          <Card className="p-5 lg:col-span-12">
+          <Card className="p-5 lg:col-span-12" collapsible>
             <SectionTitle
               icon={TrendingUp}
               kicker="Visibility"
