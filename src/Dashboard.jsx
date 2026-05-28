@@ -3758,9 +3758,17 @@ export default function ResearchOutputDashboard() {
 
     const fetchYear = async (y) => {
       const filterStr = buildFilterString(country, y, filters, 'publishers');
+      // per-page=200 (not a smaller number) matters here. OpenAlex group_by is an
+      // Elasticsearch terms aggregation whose per-group counts are APPROXIMATE when
+      // per-page is small: each shard contributes only its own top-N publishers, so
+      // a publisher's works on shards where it missed that shard's local top-N are
+      // dropped, undercounting the total. A small per-page undercounts every
+      // publisher, including the largest. Using 200 (the same value as the Top
+      // publishers panel, and the OpenAlex maximum) makes the per-year counts match
+      // that panel. We still only chart the top 15.
       const url = withMailto(
         `${OPENALEX_BASE}/works?filter=${filterStr}` +
-        `&group_by=primary_location.source.host_organization&per-page=30`
+        `&group_by=primary_location.source.host_organization&per-page=200`
       );
       try {
         const j = await fetchJson(url);
