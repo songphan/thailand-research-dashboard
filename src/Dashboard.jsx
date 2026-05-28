@@ -5482,8 +5482,8 @@ export default function ResearchOutputDashboard() {
             <div className="mb-3 flex flex-wrap items-center gap-1">
               {[
                 { key: 'avg',   label: 'Avg citations/work' },
-                { key: 'total', label: 'Total citations' },
                 { key: 'cited', label: 'Cited share' },
+                { key: 'total', label: 'Total citations' },
               ].map((tab) => {
                 const active = oaImpactTab === tab.key;
                 return (
