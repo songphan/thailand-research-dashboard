@@ -3748,6 +3748,25 @@ const SjrPanel = ({ years, country, filters, instFilterIds }) => {
   const filterActive = hasChips || hasInst;
   const instTooMany = hasInst && instFilterIds.length > 90;
 
+  // Local UI state for the "Quartile mix by field" breakdown: how to sort the
+  // fields and how many to show. Persists for the panel's lifetime.
+  const [sjrFieldSort, setSjrFieldSort] = useState('works');
+  const [sjrFieldLimit, setSjrFieldLimit] = useState(10);
+
+  // Sort all 26 fields by the chosen criterion, then optionally cap the list.
+  const fieldsView = useMemo(() => {
+    const all = sjrByQuartile.by_field || [];
+    const sortFn = ({
+      works:   (r) => r.works,
+      q1:      (r) => (r.works ? r.q1 / r.works : 0),
+      topHalf: (r) => (r.works ? (r.q1 + r.q2) / r.works : 0),
+      ranked:  (r) => (r.works ? r.ranked / r.works : 0),
+    }[sjrFieldSort] || ((r) => r.works));
+    const sorted = [...all].sort((a, b) => sortFn(b) - sortFn(a));
+    const limit = Math.min(sjrFieldLimit, all.length);
+    return { all, sorted, shown: sorted.slice(0, limit) };
+  }, [sjrFieldSort, sjrFieldLimit]);
+
   // National precomputed view, summed over the selected years (Thailand only).
   const national = useMemo(() => {
     if (!SJR_NAT_READY) return null;
@@ -3887,11 +3906,58 @@ const SjrPanel = ({ years, country, filters, instFilterIds }) => {
 
     <ProportionBar data={sjrBarData(v)} colorMap={QUARTILE_COLORS} />
 
-    {!filterActive && (sjrByQuartile.by_field || []).length > 0 && (
+    {!filterActive && fieldsView.all.length > 0 && (
       <div className="mt-6">
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase mb-2">Quartile mix by field</div>
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Quartile mix by field</div>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase ml-2">Sort by</span>
+          <div className="flex flex-wrap gap-1">
+            {[
+              { k: 'works',   l: 'Total works' },
+              { k: 'q1',      l: '% Q1' },
+              { k: 'topHalf', l: '% Top half' },
+              { k: 'ranked',  l: '% Ranked' },
+            ].map((o) => {
+              const active = sjrFieldSort === o.k;
+              return (
+                <button key={o.k} onClick={() => setSjrFieldSort(o.k)}
+                  className="rounded-sm px-2 py-0.5"
+                  style={{
+                    border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
+                    background: active ? PALETTE.ink : 'transparent',
+                    color: active ? PALETTE.cream : PALETTE.charcoal,
+                    fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.03em',
+                  }}>
+                  {o.l}
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <div>
-          {(sjrByQuartile.by_field || []).slice(0, 10).map((row) => (<SjrFieldBar key={row.field} row={row} />))}
+          {fieldsView.shown.map((row) => (<SjrFieldBar key={row.field} row={row} />))}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase">Show</span>
+          {[10, 14, 20, fieldsView.all.length].filter((n, i, arr) => arr.indexOf(n) === i).map((n) => {
+            const active = sjrFieldLimit === n;
+            const label = n >= fieldsView.all.length ? `all ${fieldsView.all.length}` : `top ${n}`;
+            return (
+              <button key={n} onClick={() => setSjrFieldLimit(n)}
+                className="rounded-sm px-2 py-0.5"
+                style={{
+                  border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
+                  background: active ? PALETTE.ink : 'transparent',
+                  color: active ? PALETTE.cream : PALETTE.charcoal,
+                  fontFamily: FONT_MONO, fontSize: 10.5,
+                }}>
+                {label}
+              </button>
+            );
+          })}
+          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="ml-2">
+            Showing {fieldsView.shown.length} of {fieldsView.all.length} fields
+          </span>
         </div>
       </div>
     )}
