@@ -6,7 +6,7 @@ import {
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
   Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X,
-  Table as TableIcon, Download, Search, ChevronDown
+  Table as TableIcon, Download, Search, ChevronDown, Filter
 } from 'lucide-react';
 
 import apcData from './data/apc_by_publisher.json';
@@ -518,13 +518,18 @@ const Card = ({ children, className = '', style = {}, collapsible = false, defau
   );
 };
 
-const SectionTitle = ({ icon: Icon, kicker, title, hint, count, countLabel }) => (
+const SectionTitle = ({ icon: Icon, kicker, title, hint, count, countLabel, filterable = false }) => (
   <div className="mb-4 flex items-start justify-between gap-3">
     <div className="flex items-start gap-3">
       {Icon && (
         <div
           className="mt-1 flex h-8 w-8 flex-none items-center justify-center rounded-sm"
-          style={{ background: PALETTE.ink, color: PALETTE.cream }}
+          style={filterable
+            ? { background: PALETTE.ink, color: PALETTE.cream }
+            : { background: 'transparent', color: PALETTE.muted, border: `1px solid ${PALETTE.rule}` }}
+          title={filterable
+            ? 'Interactive: click a bar or slice in this chart to filter the whole dashboard'
+            : 'Display only: this chart does not filter other panels'}
         >
           <Icon size={16} strokeWidth={1.6} />
         </div>
@@ -798,6 +803,79 @@ const Donut = ({ data, height = 280, colorMap, onSliceClick, selectedKeys = [] }
           );
         })}
       </ul>
+    </div>
+  );
+};
+
+// Single full-width 100% stacked proportion bar. Each segment is one category,
+// sized by its share of the total, coloured via colorMap, and clickable to
+// cross-filter (same onSegmentClick / selectedKeys contract as the donut and
+// bar charts). The legend below carries labels, percentages, and counts so the
+// bar itself stays clean. Used for the Access regime breakdown.
+const ProportionBar = ({ data, colorMap, onSegmentClick, selectedKeys = [] }) => {
+  const items = (data || []).filter((d) => d.value > 0);
+  const total = items.reduce((s, d) => s + d.value, 0);
+  if (!total) {
+    return (
+      <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-6">
+        No data for the current selection.
+      </div>
+    );
+  }
+  const hasSel = selectedKeys.length > 0;
+  return (
+    <div>
+      <div
+        className="flex w-full overflow-hidden"
+        style={{ height: 46, borderRadius: 4, border: `1px solid ${PALETTE.rule}` }}
+      >
+        {items.map((d) => {
+          const share = (d.value / total) * 100;
+          const sel = selectedKeys.includes(d.key);
+          const color = (colorMap && colorMap[d.key]) || PALETTE.teal;
+          return (
+            <div
+              key={d.key}
+              role={onSegmentClick ? 'button' : undefined}
+              onClick={onSegmentClick ? () => onSegmentClick(d) : undefined}
+              title={`${d.label}: ${fmtFull(d.value)} (${share.toFixed(1)}%)`}
+              style={{
+                width: `${share}%`,
+                background: color,
+                cursor: onSegmentClick ? 'pointer' : 'default',
+                opacity: hasSel && !sel ? 0.4 : 1,
+                borderRight: `1px solid ${PALETTE.paper}`,
+                transition: 'opacity 0.2s ease, width 0.4s ease',
+              }}
+            />
+          );
+        })}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
+        {items.map((d) => {
+          const share = (d.value / total) * 100;
+          const sel = selectedKeys.includes(d.key);
+          const color = (colorMap && colorMap[d.key]) || PALETTE.teal;
+          return (
+            <button
+              key={d.key}
+              onClick={onSegmentClick ? () => onSegmentClick(d) : undefined}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7,
+                background: 'transparent', border: 'none', padding: 0,
+                cursor: onSegmentClick ? 'pointer' : 'default',
+                opacity: hasSel && !sel ? 0.5 : 1,
+              }}
+            >
+              <span style={{ width: 11, height: 11, borderRadius: 2, background: color, flex: 'none' }} />
+              <span style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.charcoal }}>{d.label}</span>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
+                {share.toFixed(1)}% · {fmtFull(d.value)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 };
@@ -3644,23 +3722,29 @@ export default function ResearchOutputDashboard() {
   const [publisherRankCache, setPublisherRankCache] = useState({
     status: 'idle', rows: [], years: [], signature: null,
   });
-  // If the user drops back to a single year, force the publisher panel back to
-  // the standard bar view since the time-series tab is no longer applicable.
-  useEffect(() => {
-    if (years.length < 2 && publisherView !== 'top') {
-      setPublisherView('top');
-    }
-  }, [years, publisherView]);
-  // Lazy-load the rank-over-time data when the "Rank over time" tab is active:
-  // one group_by request per year for the 5-year window ending at the max
-  // selected year. Cached by a signature of country + filters + max year.
+  // Lazy-load the rank-over-time data when the "Rank over time" tab is active.
+  // Window rule: a single selected year expands to the 5-year window ending at
+  // that year (e.g. 2023 -> 2019..2023), so the baseline is always the latest
+  // selected year counting backwards. A multi-year selection uses exactly the
+  // selected years (e.g. 2023 + 2024 -> just those two). One group_by request
+  // per year in the window. Cached by a signature of country + filters + window.
   useEffect(() => {
     if (publisherView !== 'time') return;
-    if (years.length < 2) return;
-    const anchorYear = Math.max(...years);
+    if (!years || years.length === 0) return;
+
+    const sortedSel = [...years].sort((a, b) => a - b);
+    const windowYears = sortedSel.length >= 2
+      ? sortedSel
+      : (() => {
+          const anchor = sortedSel[0];
+          const arr = [];
+          for (let y = anchor - 4; y <= anchor; y++) arr.push(y);
+          return arr;
+        })();
+
     const signature = JSON.stringify({
       country,
-      anchorYear,
+      windowYears,
       filters: Object.entries(filters || {})
         .filter(([, v]) => v && v.length > 0)
         .map(([k, v]) => [k, v.map((c) => c.value).sort()])
@@ -3671,10 +3755,6 @@ export default function ResearchOutputDashboard() {
 
     let cancelled = false;
     setPublisherRankCache({ status: 'loading', rows: [], years: [], signature });
-
-    const TIME_WINDOW = 5;
-    const windowYears = [];
-    for (let y = anchorYear - TIME_WINDOW + 1; y <= anchorYear; y++) windowYears.push(y);
 
     const fetchYear = async (y) => {
       const filterStr = buildFilterString(country, y, filters, 'publishers');
@@ -3746,20 +3826,47 @@ export default function ResearchOutputDashboard() {
     return { count: n, truncated: n >= 200 };
   };
 
-  // Apply local type/subcategory filters to the institutions chart data.
-  // The full list (post-pagination) is in state.institutions.data; we narrow it
-  // in-memory rather than re-querying OpenAlex.
+  // Roster metadata lookup: OpenAlex institution id -> { type, subcategory,
+  // country, label }. Built from the /institutions roster, which is the only
+  // source of institution type and MHESI subcategory. Used to enrich the
+  // filtered group_by counts below and to drop foreign co-author institutions.
+  const institutionsRosterMeta = useMemo(() => {
+    const m = new Map();
+    for (const d of (state.institutions?.data || [])) m.set(d.key, d);
+    return m;
+  }, [state.institutions?.data]);
+
+  // The producing-institutions chart data. Counts come from the in-selection
+  // group_by (state.institutionsCounts) so the panel responds to publisher,
+  // discipline, and other filter chips. Each count is joined to the roster for
+  // its type/subcategory; entries with no roster match (foreign co-author
+  // institutions, or any beyond the roster) are dropped, which also restricts
+  // the list to the active country. Local type/subcategory pills filter further.
   const institutionsFiltered = useMemo(() => {
-    const all = state.institutions?.data || [];
-    let filtered = all;
+    const counts = state.institutionsCounts?.data || [];
+    let base = counts
+      .map((d) => {
+        const meta = institutionsRosterMeta.get(d.key);
+        if (!meta) return null;
+        return {
+          key: d.key,
+          label: meta.label,
+          fullLabel: meta.fullLabel,
+          value: d.value,
+          country: meta.country,
+          type: meta.type,
+          subcategory: meta.subcategory,
+        };
+      })
+      .filter(Boolean);
     if (instTypeFilter !== 'all') {
-      filtered = filtered.filter((d) => d.type === instTypeFilter);
+      base = base.filter((d) => d.type === instTypeFilter);
     }
     if (instSubcategoryFilter !== 'all') {
-      filtered = filtered.filter((d) => d.subcategory === instSubcategoryFilter);
+      base = base.filter((d) => d.subcategory === instSubcategoryFilter);
     }
-    return filtered;
-  }, [state.institutions?.data, instTypeFilter, instSubcategoryFilter]);
+    return base;
+  }, [state.institutionsCounts?.data, institutionsRosterMeta, instTypeFilter, instSubcategoryFilter]);
 
   // Available education-subcategory pills: only those actually present in the
   // current data set, in canonical (MHESI) display order.
@@ -4008,6 +4115,20 @@ export default function ResearchOutputDashboard() {
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 36), value: g.count }))
     );
 
+    // Producing-institution counts WITHIN the current selection. Unlike the
+    // roster fetched from the /institutions endpoint (which carries each
+    // institution's global annual works_count and never sees the works filter),
+    // this group_by counts each institution's contribution to the filtered
+    // corpus, so the panel responds to publisher, discipline, and other chips.
+    // It also returns foreign co-author institutions, which the panel drops by
+    // joining against the country roster for type metadata. See institutionsFiltered.
+    run('institutionsCounts', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), (j) =>
+      (j.group_by || [])
+        .filter((g) => g.key && g.key !== 'unknown')
+        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 40), value: g.count }))
+        .filter((d) => d.value > 0)
+    );
+
     run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
       return all
@@ -4041,12 +4162,14 @@ export default function ResearchOutputDashboard() {
     return () => { cancelled = true; };
   }, [year, refreshKey, filterStrings]);
 
-  // Producing institutions: fetched independently because it uses the /institutions
-  // endpoint (not works group_by), so it doesn't need to refire when filter chips
-  // change. Keeping this in its own useEffect breaks an infinite-render loop that
-  // would otherwise occur: filter chips → filterStrings change → main effect refires
-  // → institutions data array reference changes → syntheticInstitutionFilter
-  // recomputes → filterStrings change → loop. Decoupling stops the cascade.
+  // Institution roster (metadata only): fetched from the /institutions endpoint,
+  // keyed solely on country and years. It supplies type/subcategory metadata and
+  // the id set for the synthetic type filter; the chart counts come separately
+  // from the in-selection group_by in the main effect. Keeping the roster in its
+  // own effect, independent of the filter chips, breaks an infinite-render loop
+  // that would otherwise occur: filter chips → filterStrings change → main effect
+  // refires → roster reference changes → syntheticInstitutionFilter recomputes →
+  // filterStrings change → loop. Decoupling stops the cascade.
   useEffect(() => {
     let cancelled = false;
     const setPanel = (key, patch) => {
@@ -4072,58 +4195,35 @@ export default function ResearchOutputDashboard() {
           if (batch.length < 200) break;
         }
         if (cancelled) return;
-        // Sanity ceiling for outlier removal. An institution located in {country}
-        // cannot contribute more works to the national corpus than the corpus
-        // itself contains: every work it is affiliated to carries its own country
-        // code, so it is already inside the corpus. OpenAlex occasionally reports a
-        // grossly inflated counts_by_year for a mis-disambiguated institution (e.g.
-        // National Institute for Fusion Science for JP, where a single institution
-        // shows tens of millions of works against a ~600k national total). Fetching
-        // the corpus total lets us drop such institutions generically, without
-        // hardcoding each bad ID. A small tolerance absorbs minor counting drift.
-        let corpusCeiling = Infinity;
-        try {
-          const yearClause = `publication_year:${[...years].sort((a, b) => a - b).join('|')}`;
-          const totalFilter = `authorships.institutions.country_code:${country},${yearClause}`;
-          const tj = await fetchJson(countUrl(totalFilter));
-          const total = tj?.meta?.count ?? 0;
-          if (total > 0) corpusCeiling = total * 1.05;
-        } catch {
-          // If the total fetch fails, fall back to no ceiling rather than
-          // hiding legitimate institutions.
-        }
-        if (cancelled) return;
+        // This roster now serves as metadata only: it supplies each institution's
+        // type and MHESI subcategory (for the pills and the y-axis colours) and the
+        // id set used by the synthetic type filter. The chart counts come from the
+        // in-selection group_by (state.institutionsCounts), which is naturally
+        // bounded by the corpus, so the old counts_by_year inflation that affected
+        // mis-disambiguated institutions (e.g. National Institute for Fusion Science
+        // for JP) no longer reaches the display and needs no ceiling workaround.
         const data = allInsts
           .map((inst) => {
-            // Sum works_count across all selected years from the counts_by_year array.
-            const yearSet = new Set(years);
-            const value = (inst.counts_by_year || [])
-              .filter((c) => yearSet.has(c.year))
-              .reduce((s, c) => s + (c.works_count || 0), 0);
             const type = inst.type || 'other';
             return {
               key: inst.id,
               label: inst.display_name || 'Unknown',
               fullLabel: inst.display_name,
-              value,
               country: inst.country_code,
               type,
               subcategory: type === 'education' ? subcategoryFor(inst.display_name) : null,
             };
           })
           .filter((d) => {
-            // Standard checks: positive paper count and matching country code.
-            if (d.value <= 0 || d.country !== country) return false;
-            // Drop inflated outliers that exceed the national corpus total.
-            if (d.value > corpusCeiling) return false;
+            // Keep only institutions actually located in the active country.
+            if (d.country !== country) return false;
             // Exclude known-misclassified institutions for this country
             // (data quality issue at OpenAlex; see comment near
             // EXCLUDED_INSTITUTIONS_BY_COUNTRY at top of file).
             const excluded = EXCLUDED_INSTITUTIONS_BY_COUNTRY[country];
             if (excluded && excluded.has(d.key)) return false;
             return true;
-          })
-          .sort((a, b) => b.value - a.value);
+          });
         setPanel('institutions', { status: 'ready', data });
       } catch (e) {
         if (cancelled) return;
@@ -4460,19 +4560,48 @@ export default function ResearchOutputDashboard() {
       </section>
 
       <main className="mx-auto max-w-[1400px] px-6 py-8">
+        <div
+          className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-sm px-4 py-2.5"
+          style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}
+        >
+          <span style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">
+            Legend
+          </span>
+          <span className="flex items-center gap-2">
+            <span
+              className="flex h-6 w-6 flex-none items-center justify-center rounded-sm"
+              style={{ background: PALETTE.ink, color: PALETTE.cream }}
+            >
+              <Filter size={12} strokeWidth={1.8} />
+            </span>
+            <span style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.charcoal }}>
+              Solid icon: click a bar or slice to filter the whole dashboard
+            </span>
+          </span>
+          <span className="flex items-center gap-2">
+            <span
+              className="flex h-6 w-6 flex-none items-center justify-center rounded-sm"
+              style={{ background: 'transparent', color: PALETTE.muted, border: `1px solid ${PALETTE.rule}` }}
+            >
+              <Filter size={12} strokeWidth={1.8} />
+            </span>
+            <span style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.charcoal }}>
+              Outline icon: display only
+            </span>
+          </span>
+        </div>
         <CollapsibleSection title="Publication Landscape" subtitle="Who and what">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
           <Card className="p-5 lg:col-span-12" collapsible>
             <SectionTitle
               icon={Building2}
+              filterable
               kicker="Producing institutions"
               title="Where the research happens"
-              hint={`Full ${countryName(country)} roster · counts via institutions endpoint`}
+              hint={`${countryName(country)} institutions · counts within the current selection`}
               count={
-                state.institutions?.status === 'ready'
-                  ? (institutionsFiltered.length === (state.institutions?.data || []).length
-                      ? institutionsFiltered.length
-                      : `${institutionsFiltered.length} of ${(state.institutions?.data || []).length}`)
+                state.institutionsCounts?.status === 'ready'
+                  ? `${institutionsFiltered.length} of ${(state.institutions?.data || []).length}`
                   : null
               }
               countLabel="institutions"
@@ -4536,12 +4665,12 @@ export default function ResearchOutputDashboard() {
               </div>
             )}
             <ChartFrame
-              status={state.institutions?.status}
-              error={state.institutions?.error}
+              status={state.institutionsCounts?.status}
+              error={state.institutionsCounts?.error}
               hint={
-                institutionsFiltered.length === 0 && (state.institutions?.data || []).length > 0
-                  ? 'No institutions match the active type/subcategory filter.'
-                  : `Showing ${institutionsFiltered.length} of ${(state.institutions?.data || []).length} ${countryName(country)} institutions.`
+                institutionsFiltered.length === 0
+                  ? 'No institutions match the active filters.'
+                  : `Showing ${institutionsFiltered.length} of ${(state.institutions?.data || []).length} ${countryName(country)} institutions producing output in the current selection.`
               }
             >
               <HBar
@@ -4583,6 +4712,7 @@ export default function ResearchOutputDashboard() {
           <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Layers}
+              filterable
               kicker="Disciplinary mix"
               title="Fields of inquiry"
               hint="OpenAlex primary_topic.field"
@@ -4608,6 +4738,7 @@ export default function ResearchOutputDashboard() {
           <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Sparkles}
+              filterable
               kicker="Granular topics"
               title="Active subfields"
               hint="OpenAlex primary_topic.subfield"
@@ -4683,6 +4814,7 @@ export default function ResearchOutputDashboard() {
           <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Globe2}
+              filterable
               kicker="Co-authorship reach"
               title="International collaborators"
               hint={`${countryName(country)} excluded from list`}
@@ -4732,6 +4864,7 @@ export default function ResearchOutputDashboard() {
           <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Target}
+              filterable
               kicker="Mission alignment"
               title="UN Sustainable Development Goals"
               hint="OpenAlex SDG classifier"
@@ -4758,6 +4891,7 @@ export default function ResearchOutputDashboard() {
           <Card className="p-5 lg:col-span-6" collapsible>
             <SectionTitle
               icon={Banknote}
+              filterable
               kicker="Funding landscape"
               title="Acknowledged funders"
               hint="From grants metadata; coverage is partial"
@@ -4788,73 +4922,45 @@ export default function ResearchOutputDashboard() {
 
         <CollapsibleSection title="Publishing" subtitle="Where and how much">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-6" collapsible>
-            <SectionTitle
-              icon={BookOpen}
-              kicker="Access regime"
-              title="Open access pathways"
-              hint="Gold · Green · Hybrid · Bronze · Closed"
-              count={panelN('oaStatus')?.count}
-              countLabel="OA pathways"
-            />
-            <ChartFrame status={state.oaStatus?.status} error={state.oaStatus?.error}>
-              <Donut
-                data={sliceFor('oaStatus')}
-                height={260}
-                colorMap={OA_COLORS}
-                onSliceClick={onPick('oaStatus')}
-                selectedKeys={selKeys('oaStatus')}
-              />
-              <ChartControls
-                total={(state.oaStatus?.data || []).length}
-                limit={limitFor('oaStatus')}
-                onLimitChange={setLimit('oaStatus')}
-                onOpenTable={() => setTableOpenDim('oaStatus')}
-                options={[5, 6]}
-              />
-            </ChartFrame>
-          </Card>
-
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-12" collapsible>
             <SectionTitle
               icon={Newspaper}
+              filterable
               kicker="Publishing channels"
               title={publisherView === 'time'
                 ? `Publisher rank over time · ${countryName(country)}`
                 : `Top publishers carrying ${countryName(country)} output`}
               hint={publisherView === 'time'
-                ? `5-year window ending ${Math.max(...years)} · top 15`
+                ? `${years.length >= 2 ? `${years.length}-year selection` : `5-year window ending ${Math.max(...years)}`} · top 15`
                 : 'Host organisation of the primary location'}
               count={publisherView === 'top' ? panelN('publishers')?.count : null}
               countLabel={publisherView === 'top'
                 ? (panelN('publishers')?.truncated ? 'publishers shown · capped at 200' : 'distinct publishers')
                 : null}
             />
-            {years.length >= 2 && (
-              <div className="mb-3 flex flex-wrap items-center gap-1">
-                {[
-                  { key: 'top', label: 'Top publishers' },
-                  { key: 'time', label: 'Rank over time' },
-                ].map((tab) => {
-                  const isActive = publisherView === tab.key;
-                  return (
-                    <button
-                      key={tab.key}
-                      onClick={() => setPublisherView(tab.key)}
-                      className="rounded-sm px-2.5 py-1 transition-colors"
-                      style={{
-                        border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
-                        background: isActive ? PALETTE.ink : 'transparent',
-                        color: isActive ? PALETTE.cream : PALETTE.charcoal,
-                        fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
-                      }}
-                    >
-                      {tab.label}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            <div className="mb-3 flex flex-wrap items-center gap-1">
+              {[
+                { key: 'top', label: 'Top publishers' },
+                { key: 'time', label: 'Rank over time' },
+              ].map((tab) => {
+                const isActive = publisherView === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    onClick={() => setPublisherView(tab.key)}
+                    className="rounded-sm px-2.5 py-1 transition-colors"
+                    style={{
+                      border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
+                      background: isActive ? PALETTE.ink : 'transparent',
+                      color: isActive ? PALETTE.cream : PALETTE.charcoal,
+                      fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
             {publisherView === 'top' ? (
               <ChartFrame status={state.publishers?.status} error={state.publishers?.error}>
                 <HBar
@@ -4873,7 +4979,7 @@ export default function ResearchOutputDashboard() {
             ) : (
               <>
                 <p className="-mt-1 mb-3 max-w-3xl" style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.5 }}>
-                  Each line traces one publisher's rank position across the 5-year window. Crossings indicate one publisher overtaking another; dramatic swings indicate volatility. Top-ranked publishers in the most recent year carry warmer colours. Hover a line for year-by-year ranks and counts.
+                  Each line traces one publisher's rank position across the selected window. Crossings indicate one publisher overtaking another; dramatic swings indicate volatility. Top-ranked publishers in the most recent year carry warmer colours. Hover a line for year-by-year ranks and counts.
                 </p>
                 <RankBumpChart
                   rows={publisherRankCache.rows}
@@ -4884,6 +4990,26 @@ export default function ResearchOutputDashboard() {
                 />
               </>
             )}
+          </Card>
+
+          <Card className="p-5 lg:col-span-12" collapsible>
+            <SectionTitle
+              icon={BookOpen}
+              filterable
+              kicker="Access regime"
+              title="Open access pathways"
+              hint="Share of works by OA status · click a segment to filter"
+              count={panelN('oaStatus')?.count}
+              countLabel="OA pathways"
+            />
+            <ChartFrame status={state.oaStatus?.status} error={state.oaStatus?.error}>
+              <ProportionBar
+                data={state.oaStatus?.data || []}
+                colorMap={OA_COLORS}
+                onSegmentClick={onPick('oaStatus')}
+                selectedKeys={selKeys('oaStatus')}
+              />
+            </ChartFrame>
           </Card>
 
           <ApcPanel
