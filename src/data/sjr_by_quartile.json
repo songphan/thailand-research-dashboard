@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-28T03:28:50.003Z",
+  "generated_at": "2026-05-28T12:55:17.367Z",
   "source": "SCImago Journal Rank (SJR), https://www.scimagojr.com",
   "method": {
     "corpus": "OpenAlex Works, authorships.institutions.country_code:TH",
@@ -25,13 +25,13 @@
   ],
   "totals_by_year": {
     "2020": {
-      "works": 25620,
-      "ranked": 17002,
-      "q1": 8318,
+      "works": 25618,
+      "ranked": 17001,
+      "q1": 8317,
       "q2": 4829,
       "q3": 2592,
       "q4": 1263,
-      "unranked": 8618
+      "unranked": 8617
     },
     "2021": {
       "works": 29037,
@@ -61,32 +61,32 @@
       "unranked": 10932
     },
     "2024": {
-      "works": 35980,
-      "ranked": 24582,
-      "q1": 14363,
+      "works": 35979,
+      "ranked": 24583,
+      "q1": 14364,
       "q2": 5519,
       "q3": 3048,
       "q4": 1652,
-      "unranked": 11398
+      "unranked": 11396
     },
     "2025": {
-      "works": 43272,
+      "works": 43283,
       "ranked": 29296,
       "q1": 18070,
       "q2": 6690,
       "q3": 2932,
       "q4": 1604,
-      "unranked": 13976
+      "unranked": 13987
     }
   },
   "overall": {
-    "works": 197567,
+    "works": 197575,
     "ranked": 134536,
     "q1": 74076,
     "q2": 34522,
     "q3": 17468,
     "q4": 8470,
-    "unranked": 63031
+    "unranked": 63039
   },
   "by_field": [
     {
@@ -111,13 +111,13 @@
     },
     {
       "field": "Social Sciences",
-      "works": 14808,
-      "ranked": 5986,
-      "q1": 2569,
+      "works": 14810,
+      "ranked": 5985,
+      "q1": 2568,
       "q2": 1568,
       "q3": 1270,
       "q4": 579,
-      "unranked": 8822
+      "unranked": 8825
     },
     {
       "field": "Agricultural and Biological Sciences",
@@ -141,13 +141,13 @@
     },
     {
       "field": "Computer Science",
-      "works": 10968,
+      "works": 10969,
       "ranked": 4924,
       "q1": 1747,
       "q2": 1490,
       "q3": 970,
       "q4": 717,
-      "unranked": 6044
+      "unranked": 6045
     },
     {
       "field": "Environmental Science",
@@ -171,33 +171,33 @@
     },
     {
       "field": "Business, Management and Accounting",
-      "works": 6908,
+      "works": 6906,
       "ranked": 3169,
       "q1": 1359,
       "q2": 865,
       "q3": 645,
       "q4": 300,
-      "unranked": 3739
+      "unranked": 3737
     },
     {
       "field": "Psychology",
-      "works": 5231,
+      "works": 5232,
       "ranked": 3068,
       "q1": 1532,
       "q2": 759,
       "q3": 475,
       "q4": 302,
-      "unranked": 2163
+      "unranked": 2164
     },
     {
       "field": "Physics and Astronomy",
-      "works": 3998,
-      "ranked": 3034,
-      "q1": 1873,
+      "works": 4001,
+      "ranked": 3035,
+      "q1": 1874,
       "q2": 854,
       "q3": 222,
       "q4": 85,
-      "unranked": 964
+      "unranked": 966
     },
     {
       "field": "Immunology and Microbiology",
@@ -211,23 +211,23 @@
     },
     {
       "field": "Health Professions",
-      "works": 3582,
+      "works": 3585,
       "ranked": 2232,
       "q1": 1062,
       "q2": 557,
       "q3": 380,
       "q4": 233,
-      "unranked": 1350
+      "unranked": 1353
     },
     {
       "field": "Economics, Econometrics and Finance",
-      "works": 3335,
+      "works": 3336,
       "ranked": 1824,
       "q1": 839,
       "q2": 479,
       "q3": 302,
       "q4": 204,
-      "unranked": 1511
+      "unranked": 1512
     },
     {
       "field": "Chemistry",
@@ -350,6 +350,199 @@
       "unranked": 114
     }
   ],
+  "impact_by_quartile": {
+    "overall": {
+      "q1": {
+        "works": 74076,
+        "cites": 1265317,
+        "cited": 63671
+      },
+      "q2": {
+        "works": 34522,
+        "cites": 331979,
+        "cited": 28530
+      },
+      "q3": {
+        "works": 17468,
+        "cites": 81758,
+        "cited": 12330
+      },
+      "q4": {
+        "works": 8470,
+        "cites": 18605,
+        "cited": 4463
+      },
+      "unranked": {
+        "works": 63039,
+        "cites": 142837,
+        "cited": 25867
+      }
+    },
+    "by_year": {
+      "2020": {
+        "q1": {
+          "works": 8317,
+          "cites": 330465,
+          "cited": 7860
+        },
+        "q2": {
+          "works": 4829,
+          "cites": 95357,
+          "cited": 4621
+        },
+        "q3": {
+          "works": 2592,
+          "cites": 25690,
+          "cited": 2321
+        },
+        "q4": {
+          "works": 1263,
+          "cites": 6121,
+          "cited": 986
+        },
+        "unranked": {
+          "works": 8617,
+          "cites": 51169,
+          "cited": 5025
+        }
+      },
+      "2021": {
+        "q1": {
+          "works": 10350,
+          "cites": 318332,
+          "cited": 9900
+        },
+        "q2": {
+          "works": 5440,
+          "cites": 83377,
+          "cited": 5150
+        },
+        "q3": {
+          "works": 2941,
+          "cites": 20579,
+          "cited": 2567
+        },
+        "q4": {
+          "works": 1163,
+          "cites": 4014,
+          "cited": 831
+        },
+        "unranked": {
+          "works": 9143,
+          "cites": 32813,
+          "cited": 5243
+        }
+      },
+      "2022": {
+        "q1": {
+          "works": 11349,
+          "cites": 249219,
+          "cited": 10680
+        },
+        "q2": {
+          "works": 6391,
+          "cites": 73518,
+          "cited": 6009
+        },
+        "q3": {
+          "works": 3055,
+          "cites": 16500,
+          "cited": 2539
+        },
+        "q4": {
+          "works": 1398,
+          "cites": 3773,
+          "cited": 936
+        },
+        "unranked": {
+          "works": 8964,
+          "cites": 26617,
+          "cited": 4845
+        }
+      },
+      "2023": {
+        "q1": {
+          "works": 11626,
+          "cites": 181724,
+          "cited": 10665
+        },
+        "q2": {
+          "works": 5653,
+          "cites": 45370,
+          "cited": 4996
+        },
+        "q3": {
+          "works": 2900,
+          "cites": 10538,
+          "cited": 2185
+        },
+        "q4": {
+          "works": 1390,
+          "cites": 2597,
+          "cited": 800
+        },
+        "unranked": {
+          "works": 10932,
+          "cites": 18352,
+          "cited": 4876
+        }
+      },
+      "2024": {
+        "q1": {
+          "works": 14364,
+          "cites": 132259,
+          "cited": 12794
+        },
+        "q2": {
+          "works": 5519,
+          "cites": 25129,
+          "cited": 4420
+        },
+        "q3": {
+          "works": 3048,
+          "cites": 6518,
+          "cited": 1833
+        },
+        "q4": {
+          "works": 1652,
+          "cites": 1683,
+          "cited": 655
+        },
+        "unranked": {
+          "works": 11396,
+          "cites": 10550,
+          "cited": 4128
+        }
+      },
+      "2025": {
+        "q1": {
+          "works": 18070,
+          "cites": 53318,
+          "cited": 11772
+        },
+        "q2": {
+          "works": 6690,
+          "cites": 9228,
+          "cited": 3334
+        },
+        "q3": {
+          "works": 2932,
+          "cites": 1933,
+          "cited": 885
+        },
+        "q4": {
+          "works": 1604,
+          "cites": 417,
+          "cited": 255
+        },
+        "unranked": {
+          "works": 13987,
+          "cites": 3336,
+          "cited": 1750
+        }
+      }
+    }
+  },
   "caveats": [
     "Quartiles describe a journal’s citation standing in Scopus, not the quality of any individual article (cf. DORA, Leiden Manifesto).",
     "The unranked bucket is not a defect: much Thai output appears in the Thai Citation Index and other venues outside Scopus, which SJR does not cover.",
