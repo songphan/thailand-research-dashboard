@@ -1,0 +1,359 @@
+{
+  "generated_at": "2026-05-28T03:28:50.003Z",
+  "source": "SCImago Journal Rank (SJR), https://www.scimagojr.com",
+  "method": {
+    "corpus": "OpenAlex Works, authorships.institutions.country_code:TH",
+    "attribution": "all Thai-affiliated works (each work counted once)",
+    "quartile_rule": "SJR Best Quartile, matched by journal ISSN for the publication year (nearest available SJR year as fallback)",
+    "unranked_meaning": "journal not found in the SJR/Scopus reference for that year (includes Thai Citation Index and other non-Scopus venues, and works with no journal)"
+  },
+  "years": [
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "sjr_years": [
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "totals_by_year": {
+    "2020": {
+      "works": 25620,
+      "ranked": 17002,
+      "q1": 8318,
+      "q2": 4829,
+      "q3": 2592,
+      "q4": 1263,
+      "unranked": 8618
+    },
+    "2021": {
+      "works": 29037,
+      "ranked": 19894,
+      "q1": 10350,
+      "q2": 5440,
+      "q3": 2941,
+      "q4": 1163,
+      "unranked": 9143
+    },
+    "2022": {
+      "works": 31157,
+      "ranked": 22193,
+      "q1": 11349,
+      "q2": 6391,
+      "q3": 3055,
+      "q4": 1398,
+      "unranked": 8964
+    },
+    "2023": {
+      "works": 32501,
+      "ranked": 21569,
+      "q1": 11626,
+      "q2": 5653,
+      "q3": 2900,
+      "q4": 1390,
+      "unranked": 10932
+    },
+    "2024": {
+      "works": 35980,
+      "ranked": 24582,
+      "q1": 14363,
+      "q2": 5519,
+      "q3": 3048,
+      "q4": 1652,
+      "unranked": 11398
+    },
+    "2025": {
+      "works": 43272,
+      "ranked": 29296,
+      "q1": 18070,
+      "q2": 6690,
+      "q3": 2932,
+      "q4": 1604,
+      "unranked": 13976
+    }
+  },
+  "overall": {
+    "works": 197567,
+    "ranked": 134536,
+    "q1": 74076,
+    "q2": 34522,
+    "q3": 17468,
+    "q4": 8470,
+    "unranked": 63031
+  },
+  "by_field": [
+    {
+      "field": "Medicine",
+      "works": 46658,
+      "ranked": 36634,
+      "q1": 21503,
+      "q2": 8987,
+      "q3": 4283,
+      "q4": 1861,
+      "unranked": 10024
+    },
+    {
+      "field": "Engineering",
+      "works": 26647,
+      "ranked": 16835,
+      "q1": 9330,
+      "q2": 4183,
+      "q3": 1985,
+      "q4": 1337,
+      "unranked": 9812
+    },
+    {
+      "field": "Social Sciences",
+      "works": 14808,
+      "ranked": 5986,
+      "q1": 2569,
+      "q2": 1568,
+      "q3": 1270,
+      "q4": 579,
+      "unranked": 8822
+    },
+    {
+      "field": "Agricultural and Biological Sciences",
+      "works": 13862,
+      "ranked": 10488,
+      "q1": 5887,
+      "q2": 2595,
+      "q3": 1464,
+      "q4": 542,
+      "unranked": 3374
+    },
+    {
+      "field": "Biochemistry, Genetics and Molecular Biology",
+      "works": 12635,
+      "ranked": 10478,
+      "q1": 6375,
+      "q2": 2593,
+      "q3": 1194,
+      "q4": 316,
+      "unranked": 2157
+    },
+    {
+      "field": "Computer Science",
+      "works": 10968,
+      "ranked": 4924,
+      "q1": 1747,
+      "q2": 1490,
+      "q3": 970,
+      "q4": 717,
+      "unranked": 6044
+    },
+    {
+      "field": "Environmental Science",
+      "works": 10937,
+      "ranked": 7870,
+      "q1": 4656,
+      "q2": 1778,
+      "q3": 1024,
+      "q4": 412,
+      "unranked": 3067
+    },
+    {
+      "field": "Materials Science",
+      "works": 9436,
+      "ranked": 7749,
+      "q1": 4285,
+      "q2": 2313,
+      "q3": 637,
+      "q4": 514,
+      "unranked": 1687
+    },
+    {
+      "field": "Business, Management and Accounting",
+      "works": 6908,
+      "ranked": 3169,
+      "q1": 1359,
+      "q2": 865,
+      "q3": 645,
+      "q4": 300,
+      "unranked": 3739
+    },
+    {
+      "field": "Psychology",
+      "works": 5231,
+      "ranked": 3068,
+      "q1": 1532,
+      "q2": 759,
+      "q3": 475,
+      "q4": 302,
+      "unranked": 2163
+    },
+    {
+      "field": "Physics and Astronomy",
+      "works": 3998,
+      "ranked": 3034,
+      "q1": 1873,
+      "q2": 854,
+      "q3": 222,
+      "q4": 85,
+      "unranked": 964
+    },
+    {
+      "field": "Immunology and Microbiology",
+      "works": 3653,
+      "ranked": 3100,
+      "q1": 2232,
+      "q2": 587,
+      "q3": 212,
+      "q4": 69,
+      "unranked": 553
+    },
+    {
+      "field": "Health Professions",
+      "works": 3582,
+      "ranked": 2232,
+      "q1": 1062,
+      "q2": 557,
+      "q3": 380,
+      "q4": 233,
+      "unranked": 1350
+    },
+    {
+      "field": "Economics, Econometrics and Finance",
+      "works": 3335,
+      "ranked": 1824,
+      "q1": 839,
+      "q2": 479,
+      "q3": 302,
+      "q4": 204,
+      "unranked": 1511
+    },
+    {
+      "field": "Chemistry",
+      "works": 2932,
+      "ranked": 2418,
+      "q1": 1371,
+      "q2": 671,
+      "q3": 269,
+      "q4": 107,
+      "unranked": 514
+    },
+    {
+      "field": "Arts and Humanities",
+      "works": 2830,
+      "ranked": 1224,
+      "q1": 483,
+      "q2": 387,
+      "q3": 268,
+      "q4": 86,
+      "unranked": 1606
+    },
+    {
+      "field": "Mathematics",
+      "works": 2744,
+      "ranked": 2041,
+      "q1": 438,
+      "q2": 1040,
+      "q3": 408,
+      "q4": 155,
+      "unranked": 703
+    },
+    {
+      "field": "Decision Sciences",
+      "works": 2534,
+      "ranked": 1402,
+      "q1": 442,
+      "q2": 345,
+      "q3": 377,
+      "q4": 238,
+      "unranked": 1132
+    },
+    {
+      "field": "Energy",
+      "works": 2467,
+      "ranked": 1938,
+      "q1": 1248,
+      "q2": 461,
+      "q3": 161,
+      "q4": 68,
+      "unranked": 529
+    },
+    {
+      "field": "Neuroscience",
+      "works": 1942,
+      "ranked": 1361,
+      "q1": 851,
+      "q2": 326,
+      "q3": 127,
+      "q4": 57,
+      "unranked": 581
+    },
+    {
+      "field": "Dentistry",
+      "works": 1922,
+      "ranked": 1654,
+      "q1": 992,
+      "q2": 420,
+      "q3": 173,
+      "q4": 69,
+      "unranked": 268
+    },
+    {
+      "field": "Earth and Planetary Sciences",
+      "works": 1824,
+      "ranked": 1298,
+      "q1": 741,
+      "q2": 340,
+      "q3": 175,
+      "q4": 42,
+      "unranked": 526
+    },
+    {
+      "field": "Nursing",
+      "works": 1718,
+      "ranked": 1347,
+      "q1": 853,
+      "q2": 297,
+      "q3": 144,
+      "q4": 53,
+      "unranked": 371
+    },
+    {
+      "field": "Pharmacology, Toxicology and Pharmaceutics",
+      "works": 1626,
+      "ranked": 1388,
+      "q1": 754,
+      "q2": 341,
+      "q3": 206,
+      "q4": 87,
+      "unranked": 238
+    },
+    {
+      "field": "Chemical Engineering",
+      "works": 666,
+      "ranked": 548,
+      "q1": 389,
+      "q2": 132,
+      "q3": 17,
+      "q4": 10,
+      "unranked": 118
+    },
+    {
+      "field": "Veterinary",
+      "works": 565,
+      "ranked": 451,
+      "q1": 256,
+      "q2": 142,
+      "q3": 41,
+      "q4": 12,
+      "unranked": 114
+    }
+  ],
+  "caveats": [
+    "Quartiles describe a journal’s citation standing in Scopus, not the quality of any individual article (cf. DORA, Leiden Manifesto).",
+    "The unranked bucket is not a defect: much Thai output appears in the Thai Citation Index and other venues outside Scopus, which SJR does not cover.",
+    "Quartile is the SJR Best Quartile (the journal’s strongest Scopus subject category).",
+    "When a filter is active the panel recomputes the exact selection live in the browser; with no filter it shows these precomputed national totals."
+  ]
+}
