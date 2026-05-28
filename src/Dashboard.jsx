@@ -6,12 +6,14 @@ import {
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
   Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X,
-  Table as TableIcon, Download, Search, ChevronDown, Filter
+  Table as TableIcon, Download, Search, ChevronDown, Filter, Award
 } from 'lucide-react';
 
 import apcData from './data/apc_by_publisher.json';
 import apcPricing from './data/apc_pricing.json';
 import publisherDefaults from './data/publisher_defaults.json';
+import sjrByQuartile from './data/sjr_by_quartile.json';
+import sjrRanking from './data/sjr_ranking.json';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
 
@@ -3667,6 +3669,245 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
   </>);
 };
 
+// ===== SJR "Journal placement" (quartile) panel ==============================
+// Mirrors ApcPanel: precomputed national view (sjr_by_quartile.json) when no
+// filter is active, live in-browser recompute when a filter is active using the
+// bundled sjr_ranking.json (compact per-ISSN quartile-per-year strings).
+const SJR_YEARS = sjrRanking.years || [];
+const SJR_ISSN = sjrRanking.issn || {};
+const SJR_BUNDLE_READY = SJR_YEARS.length > 0 && Object.keys(SJR_ISSN).length > 0;
+const SJR_NAT_READY = sjrByQuartile && sjrByQuartile.status !== 'placeholder'
+  && ((sjrByQuartile.overall && sjrByQuartile.overall.works) || 0) > 0;
+const SJR_MAX_LIVE = 8000;
+const SJR_YEAR_INDEX = new Map(SJR_YEARS.map((y, i) => [y, i]));
+const QUARTILE_COLORS = { q1: '#2f6890', q2: '#5b8aa6', q3: '#c69a64', q4: '#a55a2c', unranked: '#9b9389' };
+const QUARTILE_LABELS = { q1: 'Q1', q2: 'Q2', q3: 'Q3', q4: 'Q4', unranked: 'Unranked / not in Scopus' };
+
+const sjrNearestYear = (year) => {
+  if (SJR_YEAR_INDEX.has(year)) return year;
+  let best = SJR_YEARS[0], dist = Infinity;
+  for (const y of SJR_YEARS) { const d = Math.abs(y - year); if (d < dist) { dist = d; best = y; } }
+  return best;
+};
+const sjrStripIssn = (s) => (typeof s === 'string' ? s.toUpperCase().replace(/[^0-9X]/g, '') : '');
+const sjrHyphen = (s) => (s.length === 8 ? s.slice(0, 4) + '-' + s.slice(4) : null);
+// Returns quartile 1..4, or 0 if unranked / not in the SJR reference.
+const sjrQuartileForWork = (w, year) => {
+  if (!SJR_BUNDLE_READY) return 0;
+  const src = (w.primary_location && w.primary_location.source) || {};
+  const issns = [];
+  if (src.issn_l) issns.push(sjrHyphen(sjrStripIssn(src.issn_l)));
+  for (const i of (src.issn || [])) issns.push(sjrHyphen(sjrStripIssn(i)));
+  const idx = SJR_YEAR_INDEX.get(sjrNearestYear(year));
+  for (const issn of issns) {
+    if (!issn) continue;
+    const str = SJR_ISSN[issn];
+    if (str && idx != null && idx < str.length) {
+      const q = parseInt(str[idx], 10);
+      if (q >= 1 && q <= 4) return q;
+    }
+  }
+  return 0;
+};
+const sjrPct = (n, d) => (d ? ((n / d) * 100) : 0);
+const sjrBarData = (agg) => [
+  { key: 'q1', label: QUARTILE_LABELS.q1, value: agg.q1 || 0 },
+  { key: 'q2', label: QUARTILE_LABELS.q2, value: agg.q2 || 0 },
+  { key: 'q3', label: QUARTILE_LABELS.q3, value: agg.q3 || 0 },
+  { key: 'q4', label: QUARTILE_LABELS.q4, value: agg.q4 || 0 },
+  { key: 'unranked', label: QUARTILE_LABELS.unranked, value: agg.unranked || 0 },
+];
+// Thin inline stacked bar for the per-field breakdown (no legend; colours match
+// the main bar). Display only.
+const SjrFieldBar = ({ row }) => {
+  const total = (row.q1 || 0) + (row.q2 || 0) + (row.q3 || 0) + (row.q4 || 0) + (row.unranked || 0);
+  if (!total) return null;
+  return (
+    <div className="flex items-center gap-3 py-1">
+      <div style={{ width: 190, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={row.field}>
+        {row.field.length > 30 ? row.field.slice(0, 29) + '…' : row.field}
+      </div>
+      <div className="flex flex-1 overflow-hidden" style={{ height: 16, borderRadius: 2, border: `1px solid ${PALETTE.rule}` }}>
+        {['q1', 'q2', 'q3', 'q4', 'unranked'].map((k) => {
+          const v = row[k] || 0;
+          if (!v) return null;
+          return <div key={k} title={`${QUARTILE_LABELS[k]}: ${fmtFull(v)} (${sjrPct(v, total).toFixed(1)}%)`}
+            style={{ width: `${(v / total) * 100}%`, background: QUARTILE_COLORS[k] }} />;
+        })}
+      </div>
+      <div style={{ width: 96, fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted, flex: 'none' }}>
+        {sjrPct(row.q1 || 0, total).toFixed(0)}% Q1 · {fmtFull(total)}
+      </div>
+    </div>
+  );
+};
+
+const SjrPanel = ({ years, country, filters, instFilterIds }) => {
+  const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
+  const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
+  const filterActive = hasChips || hasInst;
+  const instTooMany = hasInst && instFilterIds.length > 90;
+
+  // National precomputed view, summed over the selected years (Thailand only).
+  const national = useMemo(() => {
+    if (!SJR_NAT_READY) return null;
+    const tby = sjrByQuartile.totals_by_year || {};
+    const useYears = (years || []).filter((y) => tby[y] || tby[String(y)]);
+    const agg = { works: 0, ranked: 0, q1: 0, q2: 0, q3: 0, q4: 0, unranked: 0 };
+    const src = useYears.length ? useYears.map((y) => tby[y] || tby[String(y)]) : [sjrByQuartile.overall];
+    for (const b of src) for (const k of Object.keys(agg)) agg[k] += (b[k] || 0);
+    return agg;
+  }, [JSON.stringify(years)]);
+
+  // Live view, computed in-browser for the exact current selection.
+  const [live, setLive] = useState({ status: 'idle' });
+  useEffect(() => {
+    if (!filterActive) { setLive({ status: 'idle' }); return; }
+    if (!SJR_BUNDLE_READY) { setLive({ status: 'nobundle' }); return; }
+    if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        setLive({ status: 'loading' });
+        let filter = buildFilterString(country, years, filters);
+        if (hasInst) filter += ',authorships.institutions.id:' + instFilterIds.join('|');
+        const cj = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&per-page=1`));
+        const count = (cj.meta && cj.meta.count) || 0;
+        if (cancelled) return;
+        if (count > SJR_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
+        const SEL = 'id,publication_year,primary_location';
+        const pages = Math.min(50, Math.max(1, Math.ceil(count / 200)));
+        const pageResults = await Promise.all(
+          Array.from({ length: pages }, (_, i) =>
+            fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&page=${i + 1}`))
+              .then((j) => j.results || [])
+              .catch(() => []))
+        );
+        if (cancelled) return;
+        const agg = { works: 0, ranked: 0, q1: 0, q2: 0, q3: 0, q4: 0, unranked: 0 };
+        for (const res of pageResults) {
+          for (const w of res) {
+            const q = sjrQuartileForWork(w, w.publication_year);
+            agg.works++;
+            if (q >= 1 && q <= 4) { agg.ranked++; agg['q' + q]++; } else agg.unranked++;
+          }
+        }
+        setLive({ status: 'ready', ...agg });
+      } catch (e) {
+        if (!cancelled) setLive({ status: 'error', error: (e && e.message) || 'Live computation failed' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
+
+  const header = (hint) => (
+    <SectionTitle icon={Award} kicker="Journal placement" title="SCImago quartile of publishing venues" hint={hint} />
+  );
+  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible>{children}</Card>;
+
+  // Awaiting precompute and no filter.
+  if (!SJR_NAT_READY && !filterActive) {
+    return wrap(<>
+      {header('Awaiting precompute')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
+        <p style={{ marginBottom: 8 }}>This panel maps each work to its journal’s SCImago quartile (Q1 to Q4) and shows how much output sits in each tier. The national data has not been computed yet.</p>
+        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>Add the Scimago yearly CSVs to <strong>sjr/</strong>, run <strong>build_sjr_reference.py</strong>, then <strong>node sjr-pipeline/precompute_sjr.mjs</strong> with an OpenAlex API key. Filtering recomputes live.</p>
+      </div>
+    </>);
+  }
+
+  if (filterActive && live.status === 'nobundle') {
+    return wrap(<>{header('Reference not built')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+        Live quartile lookup needs the SJR reference. Add the Scimago CSVs to <strong>sjr/</strong> and run <strong>build_sjr_reference.py</strong>.
+      </div>
+    </>);
+  }
+  if (filterActive && live.status === 'loading') {
+    return wrap(<>{header('Live · matching current selection…')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
+  }
+  if (filterActive && live.status === 'toolarge') {
+    const msg = live.reason === 'inst'
+      ? `This institution-type selection spans too many institutions (${(instFilterIds || []).length}) to compute live. Pick a narrower subtype or also select a discipline.`
+      : `This selection covers ${(live.count || 0).toLocaleString()} works, above the ${SJR_MAX_LIVE.toLocaleString()} live cap. Narrow the filter to compute it live.`;
+    return wrap(<>{header('Selection too large for live computation')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>{msg}</div>
+    </>);
+  }
+  if (filterActive && live.status === 'error') {
+    return wrap(<>{header('Live computation unavailable')}
+      <div className="flex flex-col items-center justify-center px-4 py-10 text-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
+        <AlertCircle size={20} className="mb-2" />
+        <div style={{ fontSize: 13 }}>Could not compute this selection live.</div>
+        <div style={{ fontSize: 11, color: PALETTE.muted, marginTop: 4 }}>{live.error}</div>
+      </div>
+    </>);
+  }
+  // No filter on a non-Thailand country: national baseline is Thai only.
+  if (!filterActive && country !== 'TH') {
+    return wrap(<>{header('Apply a filter for live placement')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+        The precomputed national baseline covers {countryName('TH')}. Apply any filter (institution, discipline, or institution type) to compute the SCImago quartile mix live for {countryName(country)}.
+      </div>
+    </>);
+  }
+
+  const v = filterActive ? (live.status === 'ready' ? live : null) : national;
+  if (!v) return wrap(<>{header('Journal placement')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
+
+  const rankedTotal = v.ranked || 0;
+  const yearLabel = (() => {
+    const ys = (years || []).slice().sort((a, b) => a - b);
+    return ys.length <= 1 ? `${ys[0] || ''}` : `${ys[0]}–${ys[ys.length - 1]}`;
+  })();
+  const hint = filterActive ? `Live · current selection · ${yearLabel}` : `National · ${countryName('TH')} · precomputed · ${yearLabel}`;
+  const q1Share = sjrPct(v.q1 || 0, v.works);
+  const topHalfShare = sjrPct((v.q1 || 0) + (v.q2 || 0), v.works);
+  const rankedShare = sjrPct(rankedTotal, v.works);
+
+  return wrap(<>
+    {header(hint)}
+    <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">In Q1 journals</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: QUARTILE_COLORS.q1, lineHeight: 1.1 }} className="mt-2">{q1Share.toFixed(1)}%</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(v.q1 || 0)} works</div>
+      </div>
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Top half (Q1+Q2)</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }} className="mt-2">{topHalfShare.toFixed(1)}%</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull((v.q1 || 0) + (v.q2 || 0))} works</div>
+      </div>
+      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Ranked in Scopus</div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.teal, lineHeight: 1.1 }} className="mt-2">{rankedShare.toFixed(1)}%</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(rankedTotal)} of {fmtFull(v.works)} works</div>
+      </div>
+    </div>
+
+    <ProportionBar data={sjrBarData(v)} colorMap={QUARTILE_COLORS} />
+
+    {!filterActive && (sjrByQuartile.by_field || []).length > 0 && (
+      <div className="mt-6">
+        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase mb-2">Quartile mix by field</div>
+        <div>
+          {(sjrByQuartile.by_field || []).slice(0, 10).map((row) => (<SjrFieldBar key={row.field} row={row} />))}
+        </div>
+      </div>
+    )}
+
+    <div className="mt-5 rounded-sm px-4 py-3" style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }} className="uppercase mb-2">Method &amp; caveats</div>
+      <ul style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.6, listStyle: 'disc', paddingLeft: 18 }}>
+        <li style={{ marginBottom: 3 }}>Quartiles describe a journal’s citation standing in Scopus (SCImago SJR Best Quartile), not the quality of any individual article. See DORA and the Leiden Manifesto.</li>
+        <li style={{ marginBottom: 3 }}>“Unranked / not in Scopus” is not a defect: much Thai output appears in the Thai Citation Index and other venues SJR does not index.</li>
+        <li style={{ marginBottom: 3 }}>Each work is matched by journal ISSN to the SJR table for its publication year (nearest available year as fallback), counting all {countryName(country)}-affiliated works.</li>
+        <li style={{ marginBottom: 3 }}>{filterActive ? 'Live: matched in-browser for the current selection.' : `National: precomputed totals for ${countryName('TH')}.`} Source: SCImago Journal Rank, scimagojr.com.</li>
+      </ul>
+    </div>
+  </>);
+};
+
 export default function ResearchOutputDashboard() {
   useFonts();
 
@@ -5016,6 +5257,21 @@ export default function ResearchOutputDashboard() {
           </Card>
 
           <ApcPanel
+            years={years}
+            country={country}
+            filters={filters}
+            instFilterIds={
+              (instTypeFilter === 'all' && instSubcategoryFilter === 'all')
+                ? null
+                : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
+            }
+          />
+        </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Journal placement" subtitle="Venue standing">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+          <SjrPanel
             years={years}
             country={country}
             filters={filters}
