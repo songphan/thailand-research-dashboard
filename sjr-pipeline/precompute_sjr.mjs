@@ -23,7 +23,7 @@ const YEARS = [2020, 2021, 2022, 2023, 2024, 2025];
 const COUNTRY = 'TH';
 const OPENALEX_API_KEY = process.env.OPENALEX_API_KEY || '';
 const OPENALEX_BASE = 'https://api.openalex.org';
-const SELECT = 'id,publication_year,primary_location,primary_topic';
+const SELECT = 'id,publication_year,primary_location,primary_topic,cited_by_count';
 const PER_PAGE = 200;
 const TOP_FIELDS = 30; // how many fields to keep in the by_field breakdown
 
@@ -114,9 +114,29 @@ function tally(bucket, q) {
   else bucket.unranked++;
 }
 
+// Separate aggregation for the "Journal Placement Impact" view: per quartile
+// bucket, track the number of works, the sum of incoming citations, and the
+// number of works that have at least one citation. From these three numbers
+// the dashboard derives all three metric tabs (avg cites/work, cited share,
+// total citations) without further requests.
+const blankImpactBuckets = () => ({
+  q1: { works: 0, cites: 0, cited: 0 },
+  q2: { works: 0, cites: 0, cited: 0 },
+  q3: { works: 0, cites: 0, cited: 0 },
+  q4: { works: 0, cites: 0, cited: 0 },
+  unranked: { works: 0, cites: 0, cited: 0 },
+});
+function tallyImpact(buckets, q, cites) {
+  const k = (q >= 1 && q <= 4) ? ('q' + q) : 'unranked';
+  buckets[k].works++;
+  buckets[k].cites += cites;
+  if (cites > 0) buckets[k].cited++;
+}
+
 async function pullYear(year) {
   const filter = [`authorships.institutions.country_code:${COUNTRY}`, `publication_year:${year}`].join(',');
   const yearBucket = blankQ();
+  const yearImpact = blankImpactBuckets();
   const byField = new Map();
   let cursor = '*';
   let pageNo = 0;
@@ -127,7 +147,9 @@ async function pullYear(year) {
     const results = j.results || [];
     for (const w of results) {
       const q = quartileForWork(w, year);
+      const c = w.cited_by_count || 0;
       tally(yearBucket, q);
+      tallyImpact(yearImpact, q, c);
       const fld = fieldName(w);
       if (fld) {
         if (!byField.has(fld)) byField.set(fld, blankQ());
@@ -140,7 +162,7 @@ async function pullYear(year) {
     if (results.length < PER_PAGE) break;
   }
   process.stdout.write('\n');
-  return { year, yearBucket, byField };
+  return { year, yearBucket, yearImpact, byField };
 }
 
 async function main() {
@@ -157,9 +179,19 @@ async function main() {
   const totals_by_year = {};
   const overall = blankQ();
   const fieldAgg = new Map();
+  // Per-quartile citation impact aggregation. `impact_by_year[year][qKey]`
+  // carries { works, cites, cited }; `impactOverall` sums across years.
+  const impact_by_year = {};
+  const impactOverall = blankImpactBuckets();
   for (const py of perYear) {
     totals_by_year[py.year] = py.yearBucket;
+    impact_by_year[py.year] = py.yearImpact;
     for (const k of ['works', 'ranked', 'q1', 'q2', 'q3', 'q4', 'unranked']) overall[k] += py.yearBucket[k];
+    for (const qKey of Object.keys(impactOverall)) {
+      impactOverall[qKey].works += py.yearImpact[qKey].works;
+      impactOverall[qKey].cites += py.yearImpact[qKey].cites;
+      impactOverall[qKey].cited += py.yearImpact[qKey].cited;
+    }
     for (const [fld, b] of py.byField.entries()) {
       if (!fieldAgg.has(fld)) fieldAgg.set(fld, blankQ());
       const t = fieldAgg.get(fld);
@@ -186,6 +218,13 @@ async function main() {
     totals_by_year,
     overall,
     by_field,
+    // Citation impact per quartile bucket. Feeds the "Journal Placement Impact"
+    // card: avg cites/work, cited share, total cites — all derived from the
+    // three numbers below per bucket per year (and overall across years).
+    impact_by_quartile: {
+      overall: impactOverall,
+      by_year: impact_by_year,
+    },
     caveats: [
       'Quartiles describe a journal’s citation standing in Scopus, not the quality of any individual article (cf. DORA, Leiden Manifesto).',
       'The unranked bucket is not a defect: much Thai output appears in the Thai Citation Index and other venues outside Scopus, which SJR does not cover.',
@@ -208,6 +247,16 @@ async function main() {
   for (const py of perYear) {
     const b = py.yearBucket;
     console.log(`  ${py.year}: ${b.works.toLocaleString().padStart(7)} works, Q1 ${pct(b.q1, b.works)}%, ranked ${pct(b.ranked, b.works)}%`);
+  }
+  console.log('\nCitation impact by quartile (overall, all years):');
+  for (const k of ['q1', 'q2', 'q3', 'q4', 'unranked']) {
+    const b = impactOverall[k];
+    const avg = b.works ? (b.cites / b.works) : 0;
+    const citedShare = b.works ? ((b.cited / b.works) * 100) : 0;
+    console.log(`  ${k.padEnd(8)} ${b.works.toLocaleString().padStart(7)} works  `
+      + `avg ${avg.toFixed(2).padStart(7)} cites/work  `
+      + `cited ${citedShare.toFixed(1).padStart(5)}%  `
+      + `total ${b.cites.toLocaleString().padStart(10)} cites`);
   }
 }
 
