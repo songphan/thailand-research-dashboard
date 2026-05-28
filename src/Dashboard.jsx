@@ -4026,6 +4026,10 @@ export default function ResearchOutputDashboard() {
   // Publishing-channels view: 'top' (bar chart) or 'time' (rank-over-time bump
   // chart, only meaningful in multi-year mode). The bump chart is lazy-loaded.
   const [publisherView, setPublisherView] = useState('top');
+  // Selected metric in the OA-impact-on-citations card.
+  // 'avg' = mean citations per work (default), 'total' = sum of citations,
+  // 'cited' = share of works with at least one citation.
+  const [oaImpactTab, setOaImpactTab] = useState('avg');
   const [publisherRankCache, setPublisherRankCache] = useState({
     status: 'idle', rows: [], years: [], signature: null,
   });
@@ -4347,6 +4351,35 @@ export default function ResearchOutputDashboard() {
     // Cited vs uncited share for the active selection. Cheap: two count requests.
     run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
     run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
+
+    // Citation impact split by OA status. One group_by(cited_by_count) per OA
+    // pathway gives us, for each: total works, total cited, and total citations
+    // (sum of key * count). From these three numbers the panel derives all three
+    // tabs (avg citations/work, total citations, cited share) without further
+    // requests. Six small fetches in parallel; fired alongside the main effect.
+    setPanel('oaImpact', { status: 'loading', error: null });
+    (async () => {
+      try {
+        const statuses = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
+        const pairs = await Promise.all(statuses.map(async (s) => {
+          const url = groupUrl(`${filterStrings.all},open_access.oa_status:${s}`, 'cited_by_count');
+          const j = await fetchJson(url);
+          let cites = 0, works = 0, cited = 0;
+          for (const g of j?.group_by || []) {
+            const k = Number(g.key) || 0;
+            const w = g.count || 0;
+            cites += k * w; works += w;
+            if (k > 0) cited += w;
+          }
+          return [s, { cites, works, cited }];
+        }));
+        if (cancelled) return;
+        setPanel('oaImpact', { status: 'ready', data: Object.fromEntries(pairs) });
+      } catch (e) {
+        if (cancelled) return;
+        setPanel('oaImpact', { status: 'error', error: e.message || 'Fetch failed' });
+      }
+    })();
 
     // Prior-year comparisons for the visibility overview card. Only fired in
     // single-year mode, where there's a well-defined "the active year" to swap
@@ -5423,6 +5456,105 @@ export default function ResearchOutputDashboard() {
             countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
             activeFilters={filters}
           />
+
+          {/* Citation impact by open access status. Three tabs share the same
+              underlying data (six per-OA-status fetches in the main effect):
+              average citations per work (default), total citations, and the
+              share of works that have been cited at least once. */}
+          <Card className="p-5 lg:col-span-12" collapsible>
+            <SectionTitle
+              icon={Sparkles}
+              kicker="Open access impact"
+              title="Citation impact by open access status"
+              hint={
+                oaImpactTab === 'avg' ? 'Mean citations received per work, by OA pathway'
+                : oaImpactTab === 'total' ? 'Total citations received, by OA pathway'
+                : 'Share of works with at least one citation, by OA pathway'
+              }
+              count={(() => {
+                const d = state.oaImpact?.data;
+                if (!d) return null;
+                let tot = 0; for (const k of Object.keys(d)) tot += d[k].works;
+                return tot || null;
+              })()}
+              countLabel="OA-classified works"
+            />
+            <div className="mb-3 flex flex-wrap items-center gap-1">
+              {[
+                { key: 'avg',   label: 'Avg citations/work' },
+                { key: 'total', label: 'Total citations' },
+                { key: 'cited', label: 'Cited share' },
+              ].map((tab) => {
+                const active = oaImpactTab === tab.key;
+                return (
+                  <button key={tab.key} onClick={() => setOaImpactTab(tab.key)}
+                    className="rounded-sm px-2.5 py-1 transition-colors"
+                    style={{
+                      border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
+                      background: active ? PALETTE.ink : 'transparent',
+                      color: active ? PALETTE.cream : PALETTE.charcoal,
+                      fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
+                    }}>
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+            <ChartFrame
+              status={state.oaImpact?.status}
+              error={state.oaImpact?.error}
+              hint="Total citations and average citations per work both accumulate over time; very recent works will read low. Cited share is a less age-sensitive lens."
+            >
+              {(() => {
+                const d = state.oaImpact?.data || {};
+                const order = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
+                const rows = order.map((s) => {
+                  const r = d[s] || { cites: 0, works: 0, cited: 0 };
+                  const avg = r.works ? r.cites / r.works : 0;
+                  const citedShare = r.works ? r.cited / r.works : 0;
+                  let value, display;
+                  if (oaImpactTab === 'avg') {
+                    value = avg;
+                    display = `${avg.toFixed(2)} cites/work · ${fmtFull(r.works)} works`;
+                  } else if (oaImpactTab === 'total') {
+                    value = r.cites;
+                    display = `${fmtFull(r.cites)} cites · ${fmtFull(r.works)} works`;
+                  } else {
+                    value = citedShare * 100;
+                    display = `${(citedShare * 100).toFixed(1)}% · ${fmtFull(r.cited)} of ${fmtFull(r.works)}`;
+                  }
+                  return { key: s, label: s.charAt(0).toUpperCase() + s.slice(1), value, display, works: r.works, color: OA_COLORS[s] || PALETTE.charcoal };
+                }).filter((r) => r.works > 0)
+                  .sort((a, b) => b.value - a.value);
+
+                if (rows.length === 0) {
+                  return (
+                    <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-6">
+                      No OA-classified works in this selection.
+                    </div>
+                  );
+                }
+                const max = Math.max(1, ...rows.map((r) => r.value));
+                return (
+                  <div className="space-y-2 py-2">
+                    {rows.map((r) => (
+                      <div key={r.key} className="flex items-center gap-3">
+                        <div style={{ width: 90, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }}>
+                          {r.label}
+                        </div>
+                        <div className="flex-1" style={{ height: 22, position: 'relative', background: PALETTE.cream, borderRadius: 2 }}>
+                          <div style={{ width: `${(r.value / max) * 100}%`, background: r.color, height: '100%', borderRadius: 2, transition: 'width 0.4s ease' }} />
+                        </div>
+                        <div style={{ width: 260, fontFamily: FONT_MONO, fontSize: 11.5, color: PALETTE.ink, flex: 'none' }}>
+                          {r.display}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </ChartFrame>
+          </Card>
 
           <Card className="p-5 lg:col-span-12" collapsible>
             <SectionTitle
