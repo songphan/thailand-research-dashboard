@@ -472,7 +472,7 @@ async function fetchAllGroups(filterStr, groupBy, maxPages = 8) {
 // (a SectionTitle header) into a clickable toggle that hides the rest of the
 // card body, so a chart box can be folded away to study how filtering one panel
 // affects the others. Opt-in only, so StatCard and the methods card stay fixed.
-const Card = ({ children, className = '', style = {}, collapsible = false, defaultOpen = true }) => {
+const Card = ({ children, className = '', style = {}, collapsible = false, defaultOpen = false }) => {
   const [open, setOpen] = useState(defaultOpen);
   let inner = children;
   if (collapsible) {
@@ -3678,6 +3678,11 @@ const SJR_ISSN = sjrRanking.issn || {};
 const SJR_BUNDLE_READY = SJR_YEARS.length > 0 && Object.keys(SJR_ISSN).length > 0;
 const SJR_NAT_READY = sjrByQuartile && sjrByQuartile.status !== 'placeholder'
   && ((sjrByQuartile.overall && sjrByQuartile.overall.works) || 0) > 0;
+// Citation-impact precompute presence: the same JSON, augmented with the
+// `impact_by_quartile` block added in the extended precompute_sjr.mjs.
+const SJR_IMPACT_READY = SJR_NAT_READY
+  && sjrByQuartile.impact_by_quartile
+  && sjrByQuartile.impact_by_quartile.overall;
 const SJR_MAX_LIVE = 8000;
 const SJR_YEAR_INDEX = new Map(SJR_YEARS.map((y, i) => [y, i]));
 const QUARTILE_COLORS = { q1: '#2f6890', q2: '#5b8aa6', q3: '#c69a64', q4: '#a55a2c', unranked: '#9b9389' };
@@ -3822,7 +3827,7 @@ const SjrPanel = ({ years, country, filters, instFilterIds }) => {
   const header = (hint) => (
     <SectionTitle icon={Award} kicker="Journal placement" title="SCImago quartile of publishing venues" hint={hint} />
   );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible>{children}</Card>;
+  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible defaultOpen>{children}</Card>;
 
   // Awaiting precompute and no filter.
   if (!SJR_NAT_READY && !filterActive) {
@@ -3971,6 +3976,248 @@ const SjrPanel = ({ years, country, filters, instFilterIds }) => {
         <li style={{ marginBottom: 3 }}>{filterActive ? 'Live: matched in-browser for the current selection.' : `National: precomputed totals for ${countryName('TH')}.`} Source: SCImago Journal Rank, scimagojr.com.</li>
       </ul>
     </div>
+  </>);
+};
+
+// ===== Journal Placement Impact (citation impact by SJR quartile) ============
+// Same two-mode pattern as SjrPanel: precomputed national view when no filter
+// is active; live in-browser recompute when any filter is set (capped at
+// SJR_MAX_LIVE works). Three metric tabs share the same per-quartile triple
+// (works, cites, cited): avg cites/work (default), cited share, total cites.
+const sjrImpactBlank = () => ({
+  q1: { works: 0, cites: 0, cited: 0 },
+  q2: { works: 0, cites: 0, cited: 0 },
+  q3: { works: 0, cites: 0, cited: 0 },
+  q4: { works: 0, cites: 0, cited: 0 },
+  unranked: { works: 0, cites: 0, cited: 0 },
+});
+const sjrImpactQKey = (q) => ((q >= 1 && q <= 4) ? ('q' + q) : 'unranked');
+
+const SjrImpactPanel = ({ years, country, filters, instFilterIds }) => {
+  const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
+  const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
+  const filterActive = hasChips || hasInst;
+  const instTooMany = hasInst && instFilterIds.length > 90;
+
+  const [impactTab, setImpactTab] = useState('avg');
+
+  // National precomputed view, summed over selected years (Thailand only).
+  const national = useMemo(() => {
+    if (!SJR_IMPACT_READY) return null;
+    const impact = sjrByQuartile.impact_by_quartile;
+    const tby = impact.by_year || {};
+    const useYears = (years || []).filter((y) => tby[y] || tby[String(y)]);
+    const out = sjrImpactBlank();
+    if (useYears.length) {
+      for (const y of useYears) {
+        const cur = tby[y] || tby[String(y)] || {};
+        for (const k of Object.keys(out)) {
+          const c = cur[k] || {};
+          out[k].works += c.works || 0;
+          out[k].cites += c.cites || 0;
+          out[k].cited += c.cited || 0;
+        }
+      }
+    } else {
+      const cur = impact.overall || {};
+      for (const k of Object.keys(out)) {
+        const c = cur[k] || {};
+        out[k].works = c.works || 0;
+        out[k].cites = c.cites || 0;
+        out[k].cited = c.cited || 0;
+      }
+    }
+    return out;
+  }, [JSON.stringify(years)]);
+
+  // Live view: paginate the filtered work list and aggregate per quartile.
+  const [live, setLive] = useState({ status: 'idle' });
+  useEffect(() => {
+    if (!filterActive) { setLive({ status: 'idle' }); return; }
+    if (!SJR_BUNDLE_READY) { setLive({ status: 'nobundle' }); return; }
+    if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        setLive({ status: 'loading' });
+        let filter = buildFilterString(country, years, filters);
+        if (hasInst) filter += ',authorships.institutions.id:' + instFilterIds.join('|');
+        const cj = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&per-page=1`));
+        const count = (cj.meta && cj.meta.count) || 0;
+        if (cancelled) return;
+        if (count > SJR_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
+        const SEL = 'id,publication_year,primary_location,cited_by_count';
+        const pages = Math.min(50, Math.max(1, Math.ceil(count / 200)));
+        const pageResults = await Promise.all(
+          Array.from({ length: pages }, (_, i) =>
+            fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&page=${i + 1}`))
+              .then((j) => j.results || [])
+              .catch(() => []))
+        );
+        if (cancelled) return;
+        const buckets = sjrImpactBlank();
+        for (const res of pageResults) {
+          for (const w of res) {
+            const q = sjrQuartileForWork(w, w.publication_year);
+            const k = sjrImpactQKey(q);
+            const c = w.cited_by_count || 0;
+            buckets[k].works++;
+            buckets[k].cites += c;
+            if (c > 0) buckets[k].cited++;
+          }
+        }
+        setLive({ status: 'ready', buckets });
+      } catch (e) {
+        if (!cancelled) setLive({ status: 'error', error: (e && e.message) || 'Live computation failed' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
+
+  const header = (hint) => (
+    <SectionTitle icon={Sparkles} kicker="Journal placement impact" title="Citation impact by SJR quartile" hint={hint} />
+  );
+  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible>{children}</Card>;
+
+  if (!SJR_IMPACT_READY && !filterActive) {
+    return wrap(<>
+      {header('Awaiting precompute')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
+        <p style={{ marginBottom: 8 }}>This card shows the citation impact of works in each SJR quartile (Q1 to Q4 plus Unranked). The citation data has not been precomputed yet.</p>
+        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>Re-run <strong>node sjr-pipeline/precompute_sjr.mjs</strong> with an OpenAlex API key. The extended script also collects per-quartile citation counts. Filtering recomputes live.</p>
+      </div>
+    </>);
+  }
+  if (filterActive && live.status === 'nobundle') {
+    return wrap(<>{header('Reference not built')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+        Live quartile lookup needs the SJR reference. Add the Scimago CSVs to <strong>sjr/</strong> and run <strong>build_sjr_reference.py</strong>.
+      </div>
+    </>);
+  }
+  if (filterActive && live.status === 'loading') {
+    return wrap(<>{header('Live · matching current selection…')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
+  }
+  if (filterActive && live.status === 'toolarge') {
+    const msg = live.reason === 'inst'
+      ? `This institution-type selection spans too many institutions (${(instFilterIds || []).length}) to compute live. Pick a narrower subtype or also select a discipline.`
+      : `This selection covers ${(live.count || 0).toLocaleString()} works, above the ${SJR_MAX_LIVE.toLocaleString()} live cap. Narrow the filter to compute it live.`;
+    return wrap(<>{header('Selection too large for live computation')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>{msg}</div>
+    </>);
+  }
+  if (filterActive && live.status === 'error') {
+    return wrap(<>{header('Live computation unavailable')}
+      <div className="flex flex-col items-center justify-center px-4 py-10 text-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
+        <AlertCircle size={20} className="mb-2" />
+        <div style={{ fontSize: 13 }}>Could not compute this selection live.</div>
+        <div style={{ fontSize: 11, color: PALETTE.muted, marginTop: 4 }}>{live.error}</div>
+      </div>
+    </>);
+  }
+  if (!filterActive && country !== 'TH') {
+    return wrap(<>{header('Apply a filter for live impact')}
+      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+        The precomputed national impact baseline covers {countryName('TH')}. Apply any filter to compute the per-quartile citation impact live for {countryName(country)}.
+      </div>
+    </>);
+  }
+
+  const buckets = filterActive ? (live.status === 'ready' ? live.buckets : null) : national;
+  if (!buckets) {
+    return wrap(<>{header('Journal placement impact')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
+  }
+
+  const yearLabel = (() => {
+    const ys = (years || []).slice().sort((a, b) => a - b);
+    return ys.length <= 1 ? `${ys[0] || ''}` : `${ys[0]}–${ys[ys.length - 1]}`;
+  })();
+  const headerHint =
+    (filterActive ? 'Live · current selection · ' : `National · ${countryName('TH')} · precomputed · `) + yearLabel
+    + (impactTab === 'avg' ? ' · mean citations per work'
+        : impactTab === 'total' ? ' · total citations received'
+        : ' · share of works with at least one citation');
+
+  const totalWorks = Object.values(buckets).reduce((s, b) => s + (b.works || 0), 0);
+
+  return wrap(<>
+    {header(headerHint)}
+    <div className="mb-3 flex flex-wrap items-center gap-1">
+      {[
+        { key: 'avg',   label: 'Avg citations/work' },
+        { key: 'cited', label: 'Cited share' },
+        { key: 'total', label: 'Total citations' },
+      ].map((tab) => {
+        const active = impactTab === tab.key;
+        return (
+          <button key={tab.key} onClick={() => setImpactTab(tab.key)}
+            className="rounded-sm px-2.5 py-1 transition-colors"
+            style={{
+              border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
+              background: active ? PALETTE.ink : 'transparent',
+              color: active ? PALETTE.cream : PALETTE.charcoal,
+              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
+            }}>
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+    <ChartFrame
+      status="ready"
+      hint="Citation counts accumulate over time, so the most recent year reads low for total and average; cited share is the steadier lens."
+    >
+      {(() => {
+        const order = ['q1', 'q2', 'q3', 'q4', 'unranked'];
+        const rows = order.map((k) => {
+          const r = buckets[k] || { works: 0, cites: 0, cited: 0 };
+          const avg = r.works ? r.cites / r.works : 0;
+          const citedShare = r.works ? r.cited / r.works : 0;
+          let value, display;
+          if (impactTab === 'avg') {
+            value = avg;
+            display = `${avg.toFixed(2)} cites/work · ${fmtFull(r.works)} works`;
+          } else if (impactTab === 'total') {
+            value = r.cites;
+            display = `${fmtFull(r.cites)} cites · ${fmtFull(r.works)} works`;
+          } else {
+            value = citedShare * 100;
+            display = `${(citedShare * 100).toFixed(1)}% · ${fmtFull(r.cited)} of ${fmtFull(r.works)}`;
+          }
+          return { key: k, label: QUARTILE_LABELS[k], value, display, works: r.works, color: QUARTILE_COLORS[k] };
+        }).filter((r) => r.works > 0)
+          .sort((a, b) => b.value - a.value);
+
+        if (rows.length === 0) {
+          return (
+            <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-6">
+              No quartile-classified works in this selection.
+            </div>
+          );
+        }
+        const max = Math.max(1, ...rows.map((r) => r.value));
+        return (
+          <div className="space-y-2 py-2">
+            {rows.map((r) => (
+              <div key={r.key} className="flex items-center gap-3">
+                <div style={{ width: 220, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.label}>
+                  {r.label}
+                </div>
+                <div className="flex-1" style={{ height: 22, position: 'relative', background: PALETTE.cream, borderRadius: 2 }}>
+                  <div style={{ width: `${(r.value / max) * 100}%`, background: r.color, height: '100%', borderRadius: 2, transition: 'width 0.4s ease' }} />
+                </div>
+                <div style={{ width: 260, fontFamily: FONT_MONO, fontSize: 11.5, color: PALETTE.ink, flex: 'none' }}>
+                  {r.display}
+                </div>
+              </div>
+            ))}
+            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="px-2 pt-2">
+              {fmtFull(totalWorks)} works classified across Q1 to Q4 and Unranked.
+            </div>
+          </div>
+        );
+      })()}
+    </ChartFrame>
   </>);
 };
 
@@ -4935,7 +5182,7 @@ export default function ResearchOutputDashboard() {
         </div>
         <CollapsibleSection title="Publication Landscape" subtitle="Who and what">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-12" collapsible>
+          <Card className="p-5 lg:col-span-12" collapsible defaultOpen>
             <SectionTitle
               icon={Building2}
               filterable
@@ -5265,7 +5512,7 @@ export default function ResearchOutputDashboard() {
 
         <CollapsibleSection title="Publishing" subtitle="Where and how much">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-12" collapsible>
+          <Card className="p-5 lg:col-span-12" collapsible defaultOpen>
             <SectionTitle
               icon={Newspaper}
               filterable
@@ -5387,7 +5634,7 @@ export default function ResearchOutputDashboard() {
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
           {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
               years for comparison; in multi-year mode shows just the aggregate. */}
-          <Card className="p-5 lg:col-span-12" collapsible>
+          <Card className="p-5 lg:col-span-12" collapsible defaultOpen>
             <SectionTitle
               icon={Sparkles}
               kicker="Citation reach"
@@ -5555,6 +5802,17 @@ export default function ResearchOutputDashboard() {
               })()}
             </ChartFrame>
           </Card>
+
+          <SjrImpactPanel
+            years={years}
+            country={country}
+            filters={filters}
+            instFilterIds={
+              (instTypeFilter === 'all' && instSubcategoryFilter === 'all')
+                ? null
+                : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
+            }
+          />
 
           <Card className="p-5 lg:col-span-12" collapsible>
             <SectionTitle
