@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell,
   CartesianGrid, LabelList
@@ -4565,227 +4565,224 @@ export default function ResearchOutputDashboard() {
     return m;
   }, [country, years, filters, syntheticInstitutionFilter]);
 
-  useEffect(() => {
+  // Shared per-dimension fetch helper. Each per-card effect calls this to load
+  // its dimension's data; the returned cleanup cancels in-flight writes so a
+  // late response from a stale render cannot clobber fresh state. State is
+  // keyed by dimension name (matches what panels read out of `state`).
+  const runDimension = useCallback((key, url, transform) => {
     let cancelled = false;
-    const setPanel = (key, patch) => {
+    const set = (patch) => {
       if (cancelled) return;
       setState((s) => ({ ...s, [key]: { ...(s[key] || {}), ...patch } }));
     };
-
-    const run = async (key, url, transform) => {
-      setPanel(key, { status: 'loading', error: null });
-      try {
-        const json = await fetchJson(url);
+    set({ status: 'loading', error: null });
+    fetchJson(url)
+      .then((json) => {
         if (cancelled) return;
-        const data = transform ? await transform(json) : json;
-        setPanel(key, { status: 'ready', data });
+        const data = transform ? transform(json) : json;
+        set({ status: 'ready', data });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        set({ status: 'error', error: e.message || 'Fetch failed' });
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // KPI stats at the top of the page: always-on, fired on filter or year change.
+  useEffect(() => runDimension('total', countUrl(filterStrings.all), (j) => j?.meta?.count ?? 0),
+    [filterStrings.all, refreshKey, runDimension]);
+  useEffect(() => runDimension('oaCount', countUrl(filterStrings.all, 'is_oa:true'), (j) => j?.meta?.count ?? 0),
+    [filterStrings.all, refreshKey, runDimension]);
+  useEffect(() => runDimension('intlCount', countUrl(filterStrings.all, 'countries_distinct_count:>1'), (j) => j?.meta?.count ?? 0),
+    [filterStrings.all, refreshKey, runDimension]);
+
+  // Outgoing citations: sum (refs * works) across the reference-count distribution.
+  useEffect(() => runDimension('outgoingCites', groupUrl(filterStrings.all, 'referenced_works_count'), (j) => {
+    const groups = j?.group_by || [];
+    let totalRefs = 0, totalWorks = 0, worksWithRefs = 0;
+    for (const g of groups) {
+      const refs = Number(g.key) || 0;
+      const c = g.count || 0;
+      totalRefs += refs * c; totalWorks += c;
+      if (refs > 0) worksWithRefs += c;
+    }
+    return { totalRefs, totalWorks, worksWithRefs };
+  }), [filterStrings.all, refreshKey, runDimension]);
+
+  // Incoming citations: sum (cites * works) across the cited_by_count distribution.
+  useEffect(() => runDimension('incomingCites', groupUrl(filterStrings.all, 'cited_by_count'), (j) => {
+    const groups = j?.group_by || [];
+    let totalCites = 0, totalWorks = 0, citedWorks = 0;
+    for (const g of groups) {
+      const c = Number(g.key) || 0;
+      const w = g.count || 0;
+      totalCites += c * w; totalWorks += w;
+      if (c > 0) citedWorks += w;
+    }
+    return { totalCites, totalWorks, citedWorks };
+  }), [filterStrings.all, refreshKey, runDimension]);
+
+  // Citation reach: cited/uncited counts + prior-year comparison (single-year only).
+  useEffect(() => {
+    if (!cardOpen.citationReach) return;
+    const cleanups = [];
+    cleanups.push(runDimension('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0));
+    cleanups.push(runDimension('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0));
+    if (years.length === 1) {
+      for (let offset = 1; offset <= 5; offset++) {
+        const targetYear = year - offset;
+        if (targetYear < 2000) break;
+        const prevYearAll = filterStrings.all.replace(
+          new RegExp(`publication_year:${year}\\b`),
+          `publication_year:${targetYear}`
+        );
+        cleanups.push(runDimension(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0));
+        cleanups.push(runDimension(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0));
+      }
+    }
+    return () => { for (const fn of cleanups) try { fn(); } catch { /* noop */ } };
+  }, [filterStrings.all, year, years.length, cardOpen.citationReach, refreshKey, runDimension]);
+
+  // OA impact: six group_by(cited_by_count) requests, one per OA pathway.
+  useEffect(() => {
+    if (!cardOpen.oaImpact) return;
+    let cancelled = false;
+    const set = (patch) => { if (!cancelled) setState((s) => ({ ...s, oaImpact: { ...(s.oaImpact || {}), ...patch } })); };
+    set({ status: 'loading', error: null });
+    (async () => {
+      try {
+        const statuses = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
+        const pairs = await Promise.all(statuses.map(async (s) => {
+          const url = groupUrl(`${filterStrings.all},open_access.oa_status:${s}`, 'cited_by_count');
+          const j = await fetchJson(url);
+          let cites = 0, works = 0, cited = 0;
+          for (const g of j?.group_by || []) {
+            const k = Number(g.key) || 0;
+            const w = g.count || 0;
+            cites += k * w; works += w;
+            if (k > 0) cited += w;
+          }
+          return [s, { cites, works, cited }];
+        }));
+        if (cancelled) return;
+        set({ status: 'ready', data: Object.fromEntries(pairs) });
       } catch (e) {
         if (cancelled) return;
-        setPanel(key, { status: 'error', error: e.message || 'Fetch failed' });
+        set({ status: 'error', error: e.message || 'Fetch failed' });
       }
-    };
+    })();
+    return () => { cancelled = true; };
+  }, [filterStrings.all, cardOpen.oaImpact, refreshKey]);
 
-    run('total', countUrl(filterStrings.all), (j) => j?.meta?.count ?? 0);
-    run('oaCount', countUrl(filterStrings.all, 'is_oa:true'), (j) => j?.meta?.count ?? 0);
-    run('intlCount', countUrl(filterStrings.all, 'countries_distinct_count:>1'), (j) => j?.meta?.count ?? 0);
-    // Domestic-only: works whose author affiliations are all from a single country
-    // (the active country). We fetch the count and reuse it in the collaborators panel
-    // so users see the share of domestic-only output below the cross-border bar chart.
-    // Domestic-only count feeds the Co-authorship reach card's summary line; gate on that card.
-    if (cardOpen.collaborators) run('domesticCount', countUrl(filterStrings.all, 'countries_distinct_count:1'), (j) => j?.meta?.count ?? 0);
-
-    // Outgoing citations: sum (refs * works) across the reference-count distribution.
-    // OpenAlex doesn't expose a direct sum aggregation, so we group_by referenced_works_count
-    // and compute the weighted total client-side. Note: works whose bibliographies haven't
-    // been parsed land in the key=0 bucket, so we also surface the "with refs" count.
-    run('outgoingCites', groupUrl(filterStrings.all, 'referenced_works_count'), (j) => {
-      const groups = j?.group_by || [];
-      let totalRefs = 0;
-      let totalWorks = 0;
-      let worksWithRefs = 0;
-      for (const g of groups) {
-        const refs = Number(g.key) || 0;
-        const c = g.count || 0;
-        totalRefs += refs * c;
-        totalWorks += c;
-        if (refs > 0) worksWithRefs += c;
-      }
-      return { totalRefs, totalWorks, worksWithRefs };
-    });
-
-    // Incoming citations: same trick as outgoing, but on cited_by_count instead of
-    // referenced_works_count. The distribution gives us {key: <citation count>, count:
-    // <number of works with that many cites>}; we sum (key * count) to get total cites
-    // received by the active selection. Average = total / totalWorks.
-    run('incomingCites', groupUrl(filterStrings.all, 'cited_by_count'), (j) => {
-      const groups = j?.group_by || [];
-      let totalCites = 0;
-      let totalWorks = 0;
-      let citedWorks = 0;
-      for (const g of groups) {
-        const c = Number(g.key) || 0;
-        const w = g.count || 0;
-        totalCites += c * w;
-        totalWorks += w;
-        if (c > 0) citedWorks += w;
-      }
-      return { totalCites, totalWorks, citedWorks };
-    });
-
-    // Cited vs uncited share + per-year comparison feed the Citation reach card.
-    if (cardOpen.citationReach) {
-      run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
-      run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
-      // Prior-year comparisons: only fired in single-year mode. Multi-year hides the comparison view.
-      if (years.length === 1) {
-        for (let offset = 1; offset <= 5; offset++) {
-          const targetYear = year - offset;
-          if (targetYear < 2000) break;
-          const prevYearAll = filterStrings.all.replace(
-            new RegExp(`publication_year:${year}\\b`),
-            `publication_year:${targetYear}`
-          );
-          run(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
-          run(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0);
-        }
-      }
-    }
-
-    // Citation impact split by OA status. Six group_by(cited_by_count) requests,
-    // one per OA pathway, feeding all three tabs of the OA Impact card. Gate on
-    // that card so a closed card does not pay for the six fetches.
-    if (cardOpen.oaImpact) {
-      setPanel('oaImpact', { status: 'loading', error: null });
-      (async () => {
-        try {
-          const statuses = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
-          const pairs = await Promise.all(statuses.map(async (s) => {
-            const url = groupUrl(`${filterStrings.all},open_access.oa_status:${s}`, 'cited_by_count');
-            const j = await fetchJson(url);
-            let cites = 0, works = 0, cited = 0;
-            for (const g of j?.group_by || []) {
-              const k = Number(g.key) || 0;
-              const w = g.count || 0;
-              cites += k * w; works += w;
-              if (k > 0) cited += w;
-            }
-            return [s, { cites, works, cited }];
-          }));
-          if (cancelled) return;
-          setPanel('oaImpact', { status: 'ready', data: Object.fromEntries(pairs) });
-        } catch (e) {
-          if (cancelled) return;
-          setPanel('oaImpact', { status: 'error', error: e.message || 'Fetch failed' });
-        }
-      })();
-    }
-
-    if (cardOpen.topWorks) run('topWorks', topWorksUrl(filterStrings.all), (j) =>
+  // Top works (Prominent works card).
+  useEffect(() => {
+    if (!cardOpen.topWorks) return;
+    return runDimension('topWorks', topWorksUrl(filterStrings.all), (j) =>
       (j.results || []).map((w) => ({
-        id: w.id,
-        doi: w.doi,
-        title: w.title || 'Untitled',
-        cites: w.cited_by_count || 0,
+        id: w.id, doi: w.doi, title: w.title || 'Untitled', cites: w.cited_by_count || 0,
         type: TYPE_NAMES[w.type] || w.type || '—',
         venue: w.primary_location?.source?.display_name || '—',
         oa: w.open_access?.is_oa,
         firstAuthor:
           (w.authorships || []).find((a) => a.author_position === 'first')?.author?.display_name ||
-          (w.authorships || [])[0]?.author?.display_name ||
-          '—',
+          (w.authorships || [])[0]?.author?.display_name || '—',
       }))
     );
+  }, [filterStrings.all, cardOpen.topWorks, refreshKey, runDimension]);
 
-    if (cardOpen.docTypes) run('docTypes', groupUrl(filterStrings.docTypes, 'type'), (j) =>
-      (j.group_by || []).map((g) => ({
-        key: g.key,
-        label: TYPE_NAMES[g.key] || g.key_display_name || g.key,
-        value: g.count,
-      })).filter((d) => d.value > 0)
+  // Output forms (docTypes), Access regime (oaStatus), Language of record (languages),
+  // Disciplinary mix (fields), Granular topics (subfields), Publishing channels (publishers),
+  // Producing institutions (institutionsCounts), Mission alignment (sdgs), Funding landscape (funders):
+  // each one fires only when its card is open and only refires on changes to its own
+  // filter string (and the refresh key).
+  useEffect(() => {
+    if (!cardOpen.docTypes) return;
+    return runDimension('docTypes', groupUrl(filterStrings.docTypes, 'type'), (j) =>
+      (j.group_by || []).map((g) => ({ key: g.key, label: TYPE_NAMES[g.key] || g.key_display_name || g.key, value: g.count })).filter((d) => d.value > 0)
     );
+  }, [filterStrings.docTypes, cardOpen.docTypes, refreshKey, runDimension]);
 
-    if (cardOpen.oaStatus) run('oaStatus', groupUrl(filterStrings.oaStatus, 'open_access.oa_status'), (j) =>
-      (j.group_by || []).map((g) => ({
-        key: g.key,
-        label: g.key.charAt(0).toUpperCase() + g.key.slice(1),
-        value: g.count,
-      })).filter((d) => d.value > 0)
+  useEffect(() => {
+    if (!cardOpen.oaStatus) return;
+    return runDimension('oaStatus', groupUrl(filterStrings.oaStatus, 'open_access.oa_status'), (j) =>
+      (j.group_by || []).map((g) => ({ key: g.key, label: g.key.charAt(0).toUpperCase() + g.key.slice(1), value: g.count })).filter((d) => d.value > 0)
     );
+  }, [filterStrings.oaStatus, cardOpen.oaStatus, refreshKey, runDimension]);
 
-    if (cardOpen.languages) run('languages', groupUrl(filterStrings.languages, 'language'), (j) =>
-      (j.group_by || [])
-        .map((g) => ({
-          key: g.key,
-          label: LANG_NAMES[g.key] || g.key_display_name || g.key,
-          value: g.count,
-        }))
-        .filter((d) => d.value > 0)
+  useEffect(() => {
+    if (!cardOpen.languages) return;
+    return runDimension('languages', groupUrl(filterStrings.languages, 'language'), (j) =>
+      (j.group_by || []).map((g) => ({ key: g.key, label: LANG_NAMES[g.key] || g.key_display_name || g.key, value: g.count })).filter((d) => d.value > 0)
     );
+  }, [filterStrings.languages, cardOpen.languages, refreshKey, runDimension]);
 
-    if (cardOpen.fields) run('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
-      (j.group_by || [])
-        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 32), value: g.count }))
-        .filter((d) => d.value > 0)
+  useEffect(() => {
+    if (!cardOpen.fields) return;
+    return runDimension('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
+      (j.group_by || []).map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 32), value: g.count })).filter((d) => d.value > 0)
     );
+  }, [filterStrings.fields, cardOpen.fields, refreshKey, runDimension]);
 
-    if (cardOpen.subfields) run('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
-      (j.group_by || [])
-        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
-        .filter((d) => d.value > 0)
+  useEffect(() => {
+    if (!cardOpen.subfields) return;
+    return runDimension('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
+      (j.group_by || []).map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count })).filter((d) => d.value > 0)
     );
+  }, [filterStrings.subfields, cardOpen.subfields, refreshKey, runDimension]);
 
-    if (cardOpen.publishers) run('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
-      (j.group_by || [])
-        .filter((g) => g.key && g.key !== 'unknown')
+  useEffect(() => {
+    if (!cardOpen.publishers) return;
+    return runDimension('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
+      (j.group_by || []).filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 36), value: g.count }))
     );
+  }, [filterStrings.publishers, cardOpen.publishers, refreshKey, runDimension]);
 
-    // Producing-institution counts WITHIN the current selection. Unlike the
-    // roster fetched from the /institutions endpoint (which carries each
-    // institution's global annual works_count and never sees the works filter),
-    // this group_by counts each institution's contribution to the filtered
-    // corpus, so the panel responds to publisher, discipline, and other chips.
-    // It also returns foreign co-author institutions, which the panel drops by
-    // joining against the country roster for type metadata. See institutionsFiltered.
-    if (cardOpen.institutions) run('institutionsCounts', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), (j) =>
-      (j.group_by || [])
-        .filter((g) => g.key && g.key !== 'unknown')
-        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 40), value: g.count }))
-        .filter((d) => d.value > 0)
+  useEffect(() => {
+    if (!cardOpen.institutions) return;
+    return runDimension('institutionsCounts', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), (j) =>
+      (j.group_by || []).filter((g) => g.key && g.key !== 'unknown')
+        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 40), value: g.count })).filter((d) => d.value > 0)
     );
+  }, [filterStrings.institutions, cardOpen.institutions, refreshKey, runDimension]);
 
-    if (cardOpen.collaborators) run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
+  // Co-authorship reach: collaborator countries + domestic-only count.
+  useEffect(() => {
+    if (!cardOpen.collaborators) return;
+    const a = runDimension('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
       return all
         .map((g) => {
-          // OpenAlex returns either the bare ISO-2 code or a full URL
-          // like https://openalex.org/countries/TH. Normalise to the code.
           const raw = g.key || '';
           const m = raw.match(/\/countries\/([A-Z]{2})$/i);
           const code = (m ? m[1] : raw).toUpperCase();
           return { key: code, label: countryName(code), value: g.count, _rawKey: g.key };
         })
-        .filter((g) => g.key && g.key !== country && g.key && g.key !== 'UNKNOWN' && g.key.length === 2);
+        .filter((g) => g.key && g.key !== country && g.key !== 'UNKNOWN' && g.key.length === 2);
     });
+    const b = runDimension('domesticCount', countUrl(filterStrings.all, 'countries_distinct_count:1'), (j) => j?.meta?.count ?? 0);
+    return () => { try { a(); } catch { /* noop */ } try { b(); } catch { /* noop */ } };
+  }, [filterStrings.collaborators, filterStrings.all, country, cardOpen.collaborators, refreshKey, runDimension]);
 
-    if (cardOpen.sdgs) run('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
-      (j.group_by || [])
-        .map((g) => {
-          const num = (g.key || '').match(/\/(\d+)$/)?.[1];
-          const label = num ? `SDG ${num} · ${g.key_display_name}` : g.key_display_name;
-          return { key: g.key, label: cleanLabel(label, 42), value: g.count };
-        })
-        .filter((d) => d.value > 0)
+  useEffect(() => {
+    if (!cardOpen.sdgs) return;
+    return runDimension('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
+      (j.group_by || []).map((g) => {
+        const num = (g.key || '').match(/\/(\d+)$/)?.[1];
+        const label = num ? `SDG ${num} · ${g.key_display_name}` : g.key_display_name;
+        return { key: g.key, label: cleanLabel(label, 42), value: g.count };
+      }).filter((d) => d.value > 0)
     );
+  }, [filterStrings.sdgs, cardOpen.sdgs, refreshKey, runDimension]);
 
-    if (cardOpen.funders) run('funders', groupUrl(filterStrings.funders, 'funders.id'), (j) =>
-      (j.group_by || [])
-        .filter((g) => g.key && g.key !== 'unknown')
+  useEffect(() => {
+    if (!cardOpen.funders) return;
+    return runDimension('funders', groupUrl(filterStrings.funders, 'funders.id'), (j) =>
+      (j.group_by || []).filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
     );
-
-    return () => { cancelled = true; };
-  }, [year, refreshKey, filterStrings, cardOpen]);
+  }, [filterStrings.funders, cardOpen.funders, refreshKey, runDimension]);
 
   // Institution roster (metadata only): fetched from the /institutions endpoint,
   // keyed solely on country and years. It supplies type/subcategory metadata and
