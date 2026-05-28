@@ -472,8 +472,18 @@ async function fetchAllGroups(filterStr, groupBy, maxPages = 8) {
 // (a SectionTitle header) into a clickable toggle that hides the rest of the
 // card body, so a chart box can be folded away to study how filtering one panel
 // affects the others. Opt-in only, so StatCard and the methods card stay fixed.
-const Card = ({ children, className = '', style = {}, collapsible = false, defaultOpen = false }) => {
-  const [open, setOpen] = useState(defaultOpen);
+const Card = ({ children, className = '', style = {}, collapsible = false, defaultOpen = false, open: openProp, onToggle }) => {
+  // Hybrid open state: when `open` and `onToggle` are passed in, the parent
+  // controls the card (lets Dashboard react to open state in its fetch logic).
+  // Otherwise the card manages its own internal state as before.
+  const controlled = openProp !== undefined;
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const open = controlled ? !!openProp : internalOpen;
+  const setOpen = (next) => {
+    const value = typeof next === 'function' ? next(open) : next;
+    if (controlled) { if (onToggle) onToggle(value); }
+    else setInternalOpen(value);
+  };
   let inner = children;
   if (collapsible) {
     let kids = React.Children.toArray(children);
@@ -1955,7 +1965,7 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
 // or extra count vs expected) via toggles inside the section. The section
 // owns its own data fetch and only loads the active mode, so switching modes
 // triggers a reload rather than carrying both at once.
-const CitationInsightSection = ({ year, country, baseFilterStr, countryInstitutionIds = [], activeFilters = {} }) => {
+const CitationInsightSection = ({ year, country, baseFilterStr, countryInstitutionIds = [], activeFilters = {}, enabled = true, open, onToggle }) => {
   // Minimum works per entity to qualify for ranking. Below this, share percentages
   // are too noisy to be meaningful (e.g. a field with 3 works at 100% cited).
   const MIN_WORKS_FOR_FIELD = 30;
@@ -1999,6 +2009,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   }, [mode, sortMode]);
 
   useEffect(() => {
+    if (!enabled) return;
     if (!mode) return;
     let cancelled = false;
     const subsetClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
@@ -2142,7 +2153,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
     // loop. Joining to a string gives a stable value-based identity that only
     // changes when the actual roster changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, baseFilterStr, countryInstitutionIds.join(',')]);
+  }, [enabled, mode, baseFilterStr, countryInstitutionIds.join(',')]);
 
   // Lazy fetcher for mean-cites-per-work. Fires only when the user activates the
   // 'meanCites' sort mode and the cache for the active tab isn't populated. For
@@ -2156,6 +2167,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   // collaborators and citation networks). Tiny entities with extreme means are
   // already filtered out by the min-works threshold.
   useEffect(() => {
+    if (!enabled) return;
     if (sortMode !== 'meanCites') return;
     // Identify the active tab's data and the filter expression for "entity = X"
     // we'll use when fetching per-entity citations.
@@ -2218,7 +2230,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
     });
 
     return () => { cancelled = true; };
-  }, [sortMode, dimensionTab, mode, baseFilterStr, fields.status, subfields.status, institutions.status, publishers.status, countries.status]);
+  }, [enabled, sortMode, dimensionTab, mode, baseFilterStr, fields.status, subfields.status, institutions.status, publishers.status, countries.status]);
 
   const titleMode = mode === 'cited' ? 'cited at least once' : 'still uncited';
   const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
@@ -2328,7 +2340,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   };
 
   return (
-    <Card className="p-5 lg:col-span-12" collapsible>
+    <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>
       <SectionTitle
         icon={Sparkles}
         kicker="Citation insight"
@@ -3451,7 +3463,7 @@ const OaSplit = ({ gold, hybrid }) => {
   );
 };
 
-const ApcPanel = ({ years, country, filters, instFilterIds }) => {
+const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle }) => {
   const apcReady = apcData && apcData.status !== 'placeholder' && (apcData.by_publisher || []).length > 0;
   const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
   const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
@@ -3542,7 +3554,7 @@ const ApcPanel = ({ years, country, filters, instFilterIds }) => {
   const header = (hint) => (
     <SectionTitle icon={Banknote} kicker="Open access fees" title="Estimated APC spend by publisher" hint={hint} />
   );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible>{children}</Card>;
+  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>{children}</Card>;
 
   // Thailand only. The precomputed national totals are Thai, the
   // corresponding-author attribution hardcodes TH, and the price reference
@@ -3747,7 +3759,7 @@ const SjrFieldBar = ({ row }) => {
   );
 };
 
-const SjrPanel = ({ years, country, filters, instFilterIds }) => {
+const SjrPanel = ({ years, country, filters, instFilterIds, open, onToggle }) => {
   const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
   const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
   const filterActive = hasChips || hasInst;
@@ -3827,7 +3839,7 @@ const SjrPanel = ({ years, country, filters, instFilterIds }) => {
   const header = (hint) => (
     <SectionTitle icon={Award} kicker="Journal placement" title="SCImago quartile of publishing venues" hint={hint} />
   );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible defaultOpen>{children}</Card>;
+  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>{children}</Card>;
 
   // Awaiting precompute and no filter.
   if (!SJR_NAT_READY && !filterActive) {
@@ -3993,7 +4005,7 @@ const sjrImpactBlank = () => ({
 });
 const sjrImpactQKey = (q) => ((q >= 1 && q <= 4) ? ('q' + q) : 'unranked');
 
-const SjrImpactPanel = ({ years, country, filters, instFilterIds }) => {
+const SjrImpactPanel = ({ years, country, filters, instFilterIds, open, onToggle }) => {
   const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
   const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
   const filterActive = hasChips || hasInst;
@@ -4077,7 +4089,7 @@ const SjrImpactPanel = ({ years, country, filters, instFilterIds }) => {
   const header = (hint) => (
     <SectionTitle icon={Sparkles} kicker="Journal placement impact" title="Citation impact by SJR quartile" hint={hint} />
   );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible>{children}</Card>;
+  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>{children}</Card>;
 
   if (!SJR_IMPACT_READY && !filterActive) {
     return wrap(<>
@@ -4277,6 +4289,30 @@ export default function ResearchOutputDashboard() {
   // 'avg' = mean citations per work (default), 'total' = sum of citations,
   // 'cited' = share of works with at least one citation.
   const [oaImpactTab, setOaImpactTab] = useState('avg');
+
+  // Card-open registry. Cards become controlled via `bindCard(id)`. The main
+  // data effect gates each fetch on the corresponding id so closed cards do
+  // not trigger their OpenAlex requests on load. Defaults match the "only the
+  // first card of each section is open" policy. Toggling a card to open
+  // re-runs the main effect, which then fires the previously-skipped fetch.
+  const [cardOpen, setCardOpenState] = useState({
+    institutions: true,
+    fields: false, subfields: false, docTypes: false, languages: false,
+    collaborators: false, sdgs: false, funders: false,
+    publishers: true, oaStatus: false, apc: false,
+    sjr: true,
+    citationReach: true, citationInsight: false, oaImpact: false,
+    sjrImpact: false, topWorks: false,
+  });
+  const bindCard = useMemo(() => {
+    const cache = {};
+    return (id) => {
+      if (!cache[id]) {
+        cache[id] = (o) => setCardOpenState((m) => ({ ...m, [id]: o }));
+      }
+      return { open: cardOpen[id], onToggle: cache[id] };
+    };
+  }, [cardOpen]);
   const [publisherRankCache, setPublisherRankCache] = useState({
     status: 'idle', rows: [], years: [], signature: null,
   });
@@ -4555,7 +4591,8 @@ export default function ResearchOutputDashboard() {
     // Domestic-only: works whose author affiliations are all from a single country
     // (the active country). We fetch the count and reuse it in the collaborators panel
     // so users see the share of domestic-only output below the cross-border bar chart.
-    run('domesticCount', countUrl(filterStrings.all, 'countries_distinct_count:1'), (j) => j?.meta?.count ?? 0);
+    // Domestic-only count feeds the Co-authorship reach card's summary line; gate on that card.
+    if (cardOpen.collaborators) run('domesticCount', countUrl(filterStrings.all, 'countries_distinct_count:1'), (j) => j?.meta?.count ?? 0);
 
     // Outgoing citations: sum (refs * works) across the reference-count distribution.
     // OpenAlex doesn't expose a direct sum aggregation, so we group_by referenced_works_count
@@ -4595,57 +4632,55 @@ export default function ResearchOutputDashboard() {
       return { totalCites, totalWorks, citedWorks };
     });
 
-    // Cited vs uncited share for the active selection. Cheap: two count requests.
-    run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
-    run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
-
-    // Citation impact split by OA status. One group_by(cited_by_count) per OA
-    // pathway gives us, for each: total works, total cited, and total citations
-    // (sum of key * count). From these three numbers the panel derives all three
-    // tabs (avg citations/work, total citations, cited share) without further
-    // requests. Six small fetches in parallel; fired alongside the main effect.
-    setPanel('oaImpact', { status: 'loading', error: null });
-    (async () => {
-      try {
-        const statuses = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
-        const pairs = await Promise.all(statuses.map(async (s) => {
-          const url = groupUrl(`${filterStrings.all},open_access.oa_status:${s}`, 'cited_by_count');
-          const j = await fetchJson(url);
-          let cites = 0, works = 0, cited = 0;
-          for (const g of j?.group_by || []) {
-            const k = Number(g.key) || 0;
-            const w = g.count || 0;
-            cites += k * w; works += w;
-            if (k > 0) cited += w;
-          }
-          return [s, { cites, works, cited }];
-        }));
-        if (cancelled) return;
-        setPanel('oaImpact', { status: 'ready', data: Object.fromEntries(pairs) });
-      } catch (e) {
-        if (cancelled) return;
-        setPanel('oaImpact', { status: 'error', error: e.message || 'Fetch failed' });
-      }
-    })();
-
-    // Prior-year comparisons for the visibility overview card. Only fired in
-    // single-year mode, where there's a well-defined "the active year" to swap
-    // out of the filter string. In multi-year mode the comparison view is
-    // hidden and these fetches are skipped.
-    if (years.length === 1) {
-      for (let offset = 1; offset <= 5; offset++) {
-        const targetYear = year - offset;
-        if (targetYear < 2000) break;
-        const prevYearAll = filterStrings.all.replace(
-          new RegExp(`publication_year:${year}\\b`),
-          `publication_year:${targetYear}`
-        );
-        run(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
-        run(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0);
+    // Cited vs uncited share + per-year comparison feed the Citation reach card.
+    if (cardOpen.citationReach) {
+      run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
+      run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
+      // Prior-year comparisons: only fired in single-year mode. Multi-year hides the comparison view.
+      if (years.length === 1) {
+        for (let offset = 1; offset <= 5; offset++) {
+          const targetYear = year - offset;
+          if (targetYear < 2000) break;
+          const prevYearAll = filterStrings.all.replace(
+            new RegExp(`publication_year:${year}\\b`),
+            `publication_year:${targetYear}`
+          );
+          run(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
+          run(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0);
+        }
       }
     }
 
-    run('topWorks', topWorksUrl(filterStrings.all), (j) =>
+    // Citation impact split by OA status. Six group_by(cited_by_count) requests,
+    // one per OA pathway, feeding all three tabs of the OA Impact card. Gate on
+    // that card so a closed card does not pay for the six fetches.
+    if (cardOpen.oaImpact) {
+      setPanel('oaImpact', { status: 'loading', error: null });
+      (async () => {
+        try {
+          const statuses = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
+          const pairs = await Promise.all(statuses.map(async (s) => {
+            const url = groupUrl(`${filterStrings.all},open_access.oa_status:${s}`, 'cited_by_count');
+            const j = await fetchJson(url);
+            let cites = 0, works = 0, cited = 0;
+            for (const g of j?.group_by || []) {
+              const k = Number(g.key) || 0;
+              const w = g.count || 0;
+              cites += k * w; works += w;
+              if (k > 0) cited += w;
+            }
+            return [s, { cites, works, cited }];
+          }));
+          if (cancelled) return;
+          setPanel('oaImpact', { status: 'ready', data: Object.fromEntries(pairs) });
+        } catch (e) {
+          if (cancelled) return;
+          setPanel('oaImpact', { status: 'error', error: e.message || 'Fetch failed' });
+        }
+      })();
+    }
+
+    if (cardOpen.topWorks) run('topWorks', topWorksUrl(filterStrings.all), (j) =>
       (j.results || []).map((w) => ({
         id: w.id,
         doi: w.doi,
@@ -4661,7 +4696,7 @@ export default function ResearchOutputDashboard() {
       }))
     );
 
-    run('docTypes', groupUrl(filterStrings.docTypes, 'type'), (j) =>
+    if (cardOpen.docTypes) run('docTypes', groupUrl(filterStrings.docTypes, 'type'), (j) =>
       (j.group_by || []).map((g) => ({
         key: g.key,
         label: TYPE_NAMES[g.key] || g.key_display_name || g.key,
@@ -4669,7 +4704,7 @@ export default function ResearchOutputDashboard() {
       })).filter((d) => d.value > 0)
     );
 
-    run('oaStatus', groupUrl(filterStrings.oaStatus, 'open_access.oa_status'), (j) =>
+    if (cardOpen.oaStatus) run('oaStatus', groupUrl(filterStrings.oaStatus, 'open_access.oa_status'), (j) =>
       (j.group_by || []).map((g) => ({
         key: g.key,
         label: g.key.charAt(0).toUpperCase() + g.key.slice(1),
@@ -4677,7 +4712,7 @@ export default function ResearchOutputDashboard() {
       })).filter((d) => d.value > 0)
     );
 
-    run('languages', groupUrl(filterStrings.languages, 'language'), (j) =>
+    if (cardOpen.languages) run('languages', groupUrl(filterStrings.languages, 'language'), (j) =>
       (j.group_by || [])
         .map((g) => ({
           key: g.key,
@@ -4687,19 +4722,19 @@ export default function ResearchOutputDashboard() {
         .filter((d) => d.value > 0)
     );
 
-    run('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
+    if (cardOpen.fields) run('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
       (j.group_by || [])
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 32), value: g.count }))
         .filter((d) => d.value > 0)
     );
 
-    run('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
+    if (cardOpen.subfields) run('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
       (j.group_by || [])
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
         .filter((d) => d.value > 0)
     );
 
-    run('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
+    if (cardOpen.publishers) run('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
       (j.group_by || [])
         .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 36), value: g.count }))
@@ -4712,14 +4747,14 @@ export default function ResearchOutputDashboard() {
     // corpus, so the panel responds to publisher, discipline, and other chips.
     // It also returns foreign co-author institutions, which the panel drops by
     // joining against the country roster for type metadata. See institutionsFiltered.
-    run('institutionsCounts', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), (j) =>
+    if (cardOpen.institutions) run('institutionsCounts', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), (j) =>
       (j.group_by || [])
         .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 40), value: g.count }))
         .filter((d) => d.value > 0)
     );
 
-    run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
+    if (cardOpen.collaborators) run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
       return all
         .map((g) => {
@@ -4733,7 +4768,7 @@ export default function ResearchOutputDashboard() {
         .filter((g) => g.key && g.key !== country && g.key && g.key !== 'UNKNOWN' && g.key.length === 2);
     });
 
-    run('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
+    if (cardOpen.sdgs) run('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
       (j.group_by || [])
         .map((g) => {
           const num = (g.key || '').match(/\/(\d+)$/)?.[1];
@@ -4743,14 +4778,14 @@ export default function ResearchOutputDashboard() {
         .filter((d) => d.value > 0)
     );
 
-    run('funders', groupUrl(filterStrings.funders, 'funders.id'), (j) =>
+    if (cardOpen.funders) run('funders', groupUrl(filterStrings.funders, 'funders.id'), (j) =>
       (j.group_by || [])
         .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
     );
 
     return () => { cancelled = true; };
-  }, [year, refreshKey, filterStrings]);
+  }, [year, refreshKey, filterStrings, cardOpen]);
 
   // Institution roster (metadata only): fetched from the /institutions endpoint,
   // keyed solely on country and years. It supplies type/subcategory metadata and
@@ -5182,7 +5217,7 @@ export default function ResearchOutputDashboard() {
         </div>
         <CollapsibleSection title="Publication Landscape" subtitle="Who and what">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-12" collapsible defaultOpen>
+          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('institutions')}>
             <SectionTitle
               icon={Building2}
               filterable
@@ -5299,7 +5334,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('fields')}>
             <SectionTitle
               icon={Layers}
               filterable
@@ -5325,7 +5360,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('subfields')}>
             <SectionTitle
               icon={Sparkles}
               filterable
@@ -5351,7 +5386,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('docTypes')}>
             <SectionTitle
               icon={FileText}
               kicker="Output forms"
@@ -5376,7 +5411,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('languages')}>
             <SectionTitle
               icon={Languages}
               kicker="Language of record"
@@ -5401,7 +5436,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('collaborators')}>
             <SectionTitle
               icon={Globe2}
               filterable
@@ -5451,7 +5486,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('sdgs')}>
             <SectionTitle
               icon={Target}
               filterable
@@ -5478,7 +5513,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible>
+          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('funders')}>
             <SectionTitle
               icon={Banknote}
               filterable
@@ -5512,7 +5547,7 @@ export default function ResearchOutputDashboard() {
 
         <CollapsibleSection title="Publishing" subtitle="Where and how much">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-12" collapsible defaultOpen>
+          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('publishers')}>
             <SectionTitle
               icon={Newspaper}
               filterable
@@ -5582,7 +5617,7 @@ export default function ResearchOutputDashboard() {
             )}
           </Card>
 
-          <Card className="p-5 lg:col-span-12" collapsible>
+          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('oaStatus')}>
             <SectionTitle
               icon={BookOpen}
               filterable
@@ -5611,6 +5646,7 @@ export default function ResearchOutputDashboard() {
                 ? null
                 : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
             }
+            {...bindCard('apc')}
           />
         </div>
         </CollapsibleSection>
@@ -5626,6 +5662,7 @@ export default function ResearchOutputDashboard() {
                 ? null
                 : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
             }
+            {...bindCard('sjr')}
           />
         </div>
         </CollapsibleSection>
@@ -5634,7 +5671,7 @@ export default function ResearchOutputDashboard() {
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
           {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
               years for comparison; in multi-year mode shows just the aggregate. */}
-          <Card className="p-5 lg:col-span-12" collapsible defaultOpen>
+          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('citationReach')}>
             <SectionTitle
               icon={Sparkles}
               kicker="Citation reach"
@@ -5702,13 +5739,15 @@ export default function ResearchOutputDashboard() {
             baseFilterStr={filterStrings.all}
             countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
             activeFilters={filters}
+            enabled={cardOpen.citationInsight}
+            {...bindCard('citationInsight')}
           />
 
           {/* Citation impact by open access status. Three tabs share the same
               underlying data (six per-OA-status fetches in the main effect):
               average citations per work (default), total citations, and the
               share of works that have been cited at least once. */}
-          <Card className="p-5 lg:col-span-12" collapsible>
+          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('oaImpact')}>
             <SectionTitle
               icon={Sparkles}
               kicker="Open access impact"
@@ -5812,9 +5851,10 @@ export default function ResearchOutputDashboard() {
                 ? null
                 : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
             }
+            {...bindCard('sjrImpact')}
           />
 
-          <Card className="p-5 lg:col-span-12" collapsible>
+          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('topWorks')}>
             <SectionTitle
               icon={TrendingUp}
               kicker="Visibility"
