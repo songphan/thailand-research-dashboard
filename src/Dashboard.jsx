@@ -5210,11 +5210,6 @@ export default function ResearchOutputDashboard() {
             activeFilters={filters}
           />
 
-          <DataAvailabilitySection
-            country={country}
-            baseFilterStr={filterStrings.all}
-          />
-
           <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={TrendingUp}
