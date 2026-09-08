@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell,
   CartesianGrid, LabelList
@@ -6,14 +6,8 @@ import {
 import {
   TrendingUp, BookOpen, Globe2, Sparkles, RefreshCw, AlertCircle, Database,
   Building2, Newspaper, FileText, Layers, Languages, Target, Banknote, Loader2, X,
-  Table as TableIcon, Download, Search, ChevronDown, Filter, Award
+  Table as TableIcon, Download, Search, ChevronDown
 } from 'lucide-react';
-
-import apcData from './data/apc_by_publisher.json';
-import apcPricing from './data/apc_pricing.json';
-import publisherDefaults from './data/publisher_defaults.json';
-import sjrByQuartile from './data/sjr_by_quartile.json';
-import sjrRanking from './data/sjr_ranking.json';
 
 const OPENALEX_BASE = 'https://api.openalex.org';
 
@@ -79,6 +73,10 @@ const YEARS = [2025, 2024, 2023, 2022, 2021, 2020];
 // To add a new exclusion: add the full OpenAlex institution URL to the array
 // for the relevant country. The id should match the `id` field returned by
 // /institutions, which is the form `https://openalex.org/I123456789`.
+//
+// To verify a suspect institution before adding it here, open the institution
+// in OpenAlex Explorer, view a few of its top-cited recent works, and confirm
+// that the work's authorships have no authors with the expected country code.
 const EXCLUDED_INSTITUTIONS_BY_COUNTRY = {
   TH: new Set([
     // Ministry of Education (https://ror.org/036nq5137, www.en.moe.go.th).
@@ -251,7 +249,7 @@ const normalizeFilterValue = (key, dim = null) => {
 
 // excludeDim drops that dimension's chips so a chart can still display its full breakdown
 // when it is the source of the filter (faceted-search "exclusive" pattern).
-const buildFilterString = (country, yearOrYears, filters, excludeDim = null) => {
+const buildFilterString = (country, yearOrYears, filters, excludeDim = null, authorRole = null, correspondingRoster = null) => {
   // OpenAlex filter values support OR via the pipe character. So a multi-year
   // selection encodes as `publication_year:2023|2024|2025` and reads naturally
   // on the server side as a single-clause OR over the listed years.
@@ -266,6 +264,19 @@ const buildFilterString = (country, yearOrYears, filters, excludeDim = null) => 
     if (!def || !def.filterKey) continue;
     const values = items.map((i) => normalizeFilterValue(i.value, dim)).join('|');
     parts.push(`${def.filterKey}:${values}`);
+  }
+  // Corresponding-author restriction: narrow to works where at least one of
+  // the country's institutions is a corresponding-author institution. We use
+  // the top-100 institutions from the roster to stay under OpenAlex's 100-value
+  // OR cap in a single filter clause. In practice the top-100 institutions
+  // account for the vast majority of a country's real-world output, so the
+  // remaining tail is negligible for this restriction.
+  if (authorRole === 'corresponding' && correspondingRoster && correspondingRoster.length > 0) {
+    const idsForFilter = correspondingRoster
+      .slice(0, 100)
+      .map((id) => normalizeFilterValue(id))
+      .join('|');
+    parts.push(`corresponding_institution_ids:${idsForFilter}`);
   }
   return parts.join(',');
 };
@@ -468,80 +479,27 @@ async function fetchAllGroups(filterStr, groupBy, maxPages = 8) {
   return all;
 }
 
-// Card is a plain panel by default. Pass `collapsible` to turn the first child
-// (a SectionTitle header) into a clickable toggle that hides the rest of the
-// card body, so a chart box can be folded away to study how filtering one panel
-// affects the others. Opt-in only, so StatCard and the methods card stay fixed.
-const Card = ({ children, className = '', style = {}, collapsible = false, defaultOpen = false, open: openProp, onToggle }) => {
-  // Hybrid open state: when `open` and `onToggle` are passed in, the parent
-  // controls the card (lets Dashboard react to open state in its fetch logic).
-  // Otherwise the card manages its own internal state as before.
-  const controlled = openProp !== undefined;
-  const [internalOpen, setInternalOpen] = useState(defaultOpen);
-  const open = controlled ? !!openProp : internalOpen;
-  const setOpen = (next) => {
-    const value = typeof next === 'function' ? next(open) : next;
-    if (controlled) { if (onToggle) onToggle(value); }
-    else setInternalOpen(value);
-  };
-  let inner = children;
-  if (collapsible) {
-    let kids = React.Children.toArray(children);
-    // ApcPanel and a few branches pass a single fragment; unwrap it so the
-    // header (the SectionTitle) is the first element rather than the fragment.
-    if (kids.length === 1 && kids[0] && kids[0].type === React.Fragment) {
-      kids = React.Children.toArray(kids[0].props.children);
-    }
-    const head = kids[0];
-    const body = kids.slice(1);
-    inner = (
-      <>
-        <div
-          role="button"
-          tabIndex={0}
-          aria-expanded={open}
-          onClick={() => setOpen((o) => !o)}
-          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((o) => !o); } }}
-          title={open ? 'Collapse this box' : 'Expand this box'}
-          style={{ cursor: 'pointer', display: 'flex', alignItems: 'flex-start', gap: 8 }}
-        >
-          <div style={{ flex: 1, minWidth: 0 }}>{head}</div>
-          <ChevronDown
-            size={16}
-            style={{ flex: 'none', marginTop: 2, color: PALETTE.muted, transition: 'transform 0.2s ease', transform: open ? 'none' : 'rotate(-90deg)' }}
-          />
-        </div>
-        {open && body}
-      </>
-    );
-  }
-  return (
-    <div
-      className={`rounded-md ${className}`}
-      style={{
-        background: PALETTE.paper,
-        border: `1px solid ${PALETTE.rule}`,
-        boxShadow: '0 1px 0 rgba(26,22,18,0.03)',
-        ...style,
-      }}
-    >
-      {inner}
-    </div>
-  );
-};
+const Card = ({ children, className = '', style = {} }) => (
+  <div
+    className={`rounded-md ${className}`}
+    style={{
+      background: PALETTE.paper,
+      border: `1px solid ${PALETTE.rule}`,
+      boxShadow: '0 1px 0 rgba(26,22,18,0.03)',
+      ...style,
+    }}
+  >
+    {children}
+  </div>
+);
 
-const SectionTitle = ({ icon: Icon, kicker, title, hint, count, countLabel, filterable = false }) => (
+const SectionTitle = ({ icon: Icon, kicker, title, hint, count, countLabel }) => (
   <div className="mb-4 flex items-start justify-between gap-3">
     <div className="flex items-start gap-3">
       {Icon && (
         <div
           className="mt-1 flex h-8 w-8 flex-none items-center justify-center rounded-sm"
-          style={filterable
-            ? { background: PALETTE.ink, color: PALETTE.cream }
-            : { background: 'transparent', color: PALETTE.muted, border: `1px solid ${PALETTE.rule}` }}
-          title={filterable
-            ? 'Interactive: click a bar or slice in this chart to filter the whole dashboard'
-            : 'Display only: this chart does not filter other panels'}
+          style={{ background: PALETTE.ink, color: PALETTE.cream }}
         >
           <Icon size={16} strokeWidth={1.6} />
         </div>
@@ -815,79 +773,6 @@ const Donut = ({ data, height = 280, colorMap, onSliceClick, selectedKeys = [] }
           );
         })}
       </ul>
-    </div>
-  );
-};
-
-// Single full-width 100% stacked proportion bar. Each segment is one category,
-// sized by its share of the total, coloured via colorMap, and clickable to
-// cross-filter (same onSegmentClick / selectedKeys contract as the donut and
-// bar charts). The legend below carries labels, percentages, and counts so the
-// bar itself stays clean. Used for the Access regime breakdown.
-const ProportionBar = ({ data, colorMap, onSegmentClick, selectedKeys = [] }) => {
-  const items = (data || []).filter((d) => d.value > 0);
-  const total = items.reduce((s, d) => s + d.value, 0);
-  if (!total) {
-    return (
-      <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-6">
-        No data for the current selection.
-      </div>
-    );
-  }
-  const hasSel = selectedKeys.length > 0;
-  return (
-    <div>
-      <div
-        className="flex w-full overflow-hidden"
-        style={{ height: 46, borderRadius: 4, border: `1px solid ${PALETTE.rule}` }}
-      >
-        {items.map((d) => {
-          const share = (d.value / total) * 100;
-          const sel = selectedKeys.includes(d.key);
-          const color = (colorMap && colorMap[d.key]) || PALETTE.teal;
-          return (
-            <div
-              key={d.key}
-              role={onSegmentClick ? 'button' : undefined}
-              onClick={onSegmentClick ? () => onSegmentClick(d) : undefined}
-              title={`${d.label}: ${fmtFull(d.value)} (${share.toFixed(1)}%)`}
-              style={{
-                width: `${share}%`,
-                background: color,
-                cursor: onSegmentClick ? 'pointer' : 'default',
-                opacity: hasSel && !sel ? 0.4 : 1,
-                borderRight: `1px solid ${PALETTE.paper}`,
-                transition: 'opacity 0.2s ease, width 0.4s ease',
-              }}
-            />
-          );
-        })}
-      </div>
-      <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
-        {items.map((d) => {
-          const share = (d.value / total) * 100;
-          const sel = selectedKeys.includes(d.key);
-          const color = (colorMap && colorMap[d.key]) || PALETTE.teal;
-          return (
-            <button
-              key={d.key}
-              onClick={onSegmentClick ? () => onSegmentClick(d) : undefined}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 7,
-                background: 'transparent', border: 'none', padding: 0,
-                cursor: onSegmentClick ? 'pointer' : 'default',
-                opacity: hasSel && !sel ? 0.5 : 1,
-              }}
-            >
-              <span style={{ width: 11, height: 11, borderRadius: 2, background: color, flex: 'none' }} />
-              <span style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.charcoal }}>{d.label}</span>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.muted }}>
-                {share.toFixed(1)}% · {fmtFull(d.value)}
-              </span>
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 };
@@ -1958,14 +1843,696 @@ const CitationReachScatter = ({ rows, globalRate, mode, minWorks, status, sortMo
   );
 };
 
-// Citation insight section showing top institutions, fields, subfields,
+// Bump chart for showing how the rank of a set of entities (publishers, etc.)
+// changes across a sequence of years. Each entity is one line that traces its
+// rank position from left to right. Lines that cross indicate one entity
+// overtaking another; lines that move sharply up or down indicate volatility.
+//
+// Input shape: rows = [
+//   { key, label, ranks: { 2021: 3, 2022: 5, 2023: 4, ... }, counts: { 2021: 1200, ... } },
+//   ...
+// ]
+// years = sorted array of years to plot (left to right).
+// Entities missing a rank for a given year are drawn with a faded segment to
+// the nearest known rank.
+const RankBumpChart = ({ rows, years, topN = 15, status, accentColor }) => {
+  const W = 720;
+  const H = 360;
+  const PAD = { top: 28, right: 220, bottom: 36, left: 36 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+  const [hover, setHover] = React.useState(null);
+
+  if (status === 'loading') {
+    return (
+      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+        <Loader2 size={14} className="animate-spin" />
+        <span className="ml-2">Computing rank trajectories…</span>
+      </div>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
+        Could not load rank data.
+      </div>
+    );
+  }
+  if (!rows || rows.length === 0 || !years || years.length === 0) {
+    return (
+      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+        Not enough data to build a rank chart.
+      </div>
+    );
+  }
+
+  // X positions: one per year, equally spaced.
+  const xFor = (year) => {
+    if (years.length === 1) return PAD.left + plotW / 2;
+    const idx = years.indexOf(year);
+    return PAD.left + (idx / (years.length - 1)) * plotW;
+  };
+  // Y positions: rank 1 at top, rank topN at bottom.
+  const yFor = (rank) => PAD.top + ((rank - 1) / Math.max(1, topN - 1)) * plotH;
+
+  // Color encoding: sequential palette based on the entity's rank in the
+  // most recent year. The top-ranked publisher gets the warmest accent;
+  // those further down get cooler shades. This makes "where is this
+  // publisher now" visually clear at a glance.
+  const lastYear = years[years.length - 1];
+  // Sort rows by their rank in lastYear (entities with no last-year rank go to
+  // the end). Then assign colors by position in this sorted list.
+  const sortedByLast = [...rows].sort((a, b) => {
+    const ra = a.ranks[lastYear] ?? Infinity;
+    const rb = b.ranks[lastYear] ?? Infinity;
+    return ra - rb;
+  });
+  // 15-step palette from rust → teal, perceptually distinct.
+  const colorRamp = [
+    '#a04f1f', '#b56423', '#c87c30', '#cb8d4a', '#c69a64',
+    '#a89878', '#888a82', '#6e8488', '#577e8e', '#477694',
+    '#3a6f93', '#2f6890', '#2c5f7d', '#2b5469', '#2c4a55',
+  ];
+  const colorFor = (key) => {
+    const idx = sortedByLast.findIndex((r) => r.key === key);
+    if (idx < 0) return PALETTE.muted;
+    return colorRamp[Math.min(idx, colorRamp.length - 1)];
+  };
+
+  return (
+    <div className="relative" style={{ width: '100%' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+        {/* Y axis: rank position guides at every 3 ranks */}
+        {[1, 5, 10, 15].filter((r) => r <= topN).map((r) => (
+          <g key={`y-${r}`}>
+            <line
+              x1={PAD.left} x2={W - PAD.right}
+              y1={yFor(r)} y2={yFor(r)}
+              stroke={PALETTE.rule}
+              strokeDasharray="2 4"
+            />
+            <text
+              x={PAD.left - 6} y={yFor(r) + 3}
+              textAnchor="end"
+              style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}
+            >
+              #{r}
+            </text>
+          </g>
+        ))}
+        {/* X axis: year labels */}
+        {years.map((y) => (
+          <g key={`x-${y}`}>
+            <text
+              x={xFor(y)} y={PAD.top - 10}
+              textAnchor="middle"
+              style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.04em', fill: PALETTE.charcoal, fontWeight: 500 }}
+            >
+              {y}
+            </text>
+            <line
+              x1={xFor(y)} x2={xFor(y)}
+              y1={PAD.top} y2={H - PAD.bottom}
+              stroke={PALETTE.rule}
+              strokeDasharray="1 5"
+              opacity="0.4"
+            />
+          </g>
+        ))}
+        {/* Axis title */}
+        <text
+          x={14} y={PAD.top + plotH / 2}
+          textAnchor="middle"
+          transform={`rotate(-90, 14, ${PAD.top + plotH / 2})`}
+          style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
+        >
+          RANK
+        </text>
+        {/* Lines: one per entity. Each segment connects (year, rank) → (next year, rank). */}
+        {sortedByLast.map((row) => {
+          const segments = [];
+          for (let i = 0; i < years.length - 1; i++) {
+            const y1 = years[i];
+            const y2 = years[i + 1];
+            const r1 = row.ranks[y1];
+            const r2 = row.ranks[y2];
+            if (r1 == null || r2 == null) {
+              // One side is missing: draw a faded segment that still shows
+              // the existing endpoint, jumping from the topN+1 "off-chart"
+              // position to the known rank or vice versa.
+              const fakeR1 = r1 ?? topN + 1;
+              const fakeR2 = r2 ?? topN + 1;
+              segments.push({
+                x1: xFor(y1), y1: yFor(fakeR1),
+                x2: xFor(y2), y2: yFor(fakeR2),
+                faded: true,
+              });
+            } else {
+              segments.push({
+                x1: xFor(y1), y1: yFor(r1),
+                x2: xFor(y2), y2: yFor(r2),
+                faded: false,
+              });
+            }
+          }
+          const color = colorFor(row.key);
+          const isHovered = hover && hover.key === row.key;
+          return (
+            <g
+              key={row.key}
+              onMouseEnter={() => setHover(row)}
+              onMouseLeave={() => setHover(null)}
+              style={{ cursor: 'pointer' }}
+            >
+              {/* Wider invisible hitbox for easier hovering */}
+              {segments.map((s, i) => (
+                <line
+                  key={`hit-${i}`}
+                  x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
+                  stroke="transparent" strokeWidth="14"
+                />
+              ))}
+              {/* Visible line segments */}
+              {segments.map((s, i) => (
+                <line
+                  key={`line-${i}`}
+                  x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
+                  stroke={color}
+                  strokeWidth={isHovered ? 3 : 2}
+                  strokeOpacity={s.faded ? 0.25 : (hover && !isHovered ? 0.25 : 0.85)}
+                  strokeLinecap="round"
+                />
+              ))}
+              {/* Dots at each known data point */}
+              {years.map((y) => {
+                const r = row.ranks[y];
+                if (r == null) return null;
+                return (
+                  <circle
+                    key={`pt-${y}`}
+                    cx={xFor(y)} cy={yFor(r)}
+                    r={isHovered ? 4.5 : 3}
+                    fill={color}
+                    stroke={PALETTE.paper}
+                    strokeWidth="1.2"
+                    fillOpacity={hover && !isHovered ? 0.35 : 1}
+                  />
+                );
+              })}
+              {/* Right-side label for the entity, at the last known rank */}
+              {(() => {
+                // Find the last known rank to anchor the label.
+                let labelYear = null;
+                for (let i = years.length - 1; i >= 0; i--) {
+                  if (row.ranks[years[i]] != null) {
+                    labelYear = years[i];
+                    break;
+                  }
+                }
+                if (labelYear == null) return null;
+                const r = row.ranks[labelYear];
+                return (
+                  <text
+                    x={W - PAD.right + 10}
+                    y={yFor(r) + 3}
+                    style={{
+                      fontFamily: FONT_BODY,
+                      fontSize: isHovered ? 12 : 11,
+                      fill: hover && !isHovered ? PALETTE.muted : PALETTE.ink,
+                      fontWeight: isHovered ? 600 : 400,
+                    }}
+                  >
+                    {row.label.length > 28 ? row.label.slice(0, 27) + '…' : row.label}
+                  </text>
+                );
+              })()}
+            </g>
+          );
+        })}
+      </svg>
+      {/* Tooltip */}
+      {hover && (
+        <div
+          className="pointer-events-none absolute rounded-sm px-3 py-2"
+          style={{
+            background: PALETTE.ink,
+            color: PALETTE.cream,
+            fontFamily: FONT_BODY,
+            fontSize: 11.5,
+            lineHeight: 1.45,
+            border: `1px solid ${PALETTE.ink}`,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+            top: 8,
+            right: 8,
+            maxWidth: 300,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{hover.label}</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, opacity: 0.9 }}>
+            {years.map((y) => {
+              const r = hover.ranks[y];
+              const c = hover.counts[y];
+              return (
+                <div key={y}>
+                  {y}: {r != null ? `#${r}` : '—'}
+                  {c != null && <span style={{ opacity: 0.7 }}> ({fmtFull(c)} works)</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+
+// Research data availability section. Measures how many works in the current
+// selection have a linked dataset in OpenAlex (sourced from Crossref and
+// DataCite relations), what the citation contrast looks like, and which
+// funders and institutions have the highest data-sharing rates.
+//
+// IMPORTANT INTERPRETIVE NOTE: The `datasets` field is an undercount. Many
+// papers with actual open data don't have their linkage propagated to
+// OpenAlex, so treat all rates here as a lower bound. Framing throughout the
+// section reflects this ("papers with a linked dataset in OpenAlex" rather
+// than "papers with open data").
+//
+// Data acquisition strategy: two lazy-fetch calls when the section becomes
+// visible or the user clicks Load.
+//   - Call A: random sample of 200 works via `sample=200`, used to estimate
+//     the overall rate and to break down by funder / corresponding institution.
+//   - Call B: top-200 works by cited_by_count, client-side filtered to those
+//     with linked datasets, top 20 shown as the prominent-works list.
+// Two calls total, so the section is cheap and can be lazy-loaded easily.
+const DataAvailabilitySection = ({ country, baseFilterStr }) => {
+  const [data, setData] = React.useState({ status: 'idle' });
+
+  // Track the base filter that the current cache was built for. If it changes,
+  // we invalidate.
+  const [cachedFor, setCachedFor] = React.useState(null);
+
+  const load = React.useCallback(() => {
+    setData({ status: 'loading' });
+    setCachedFor(baseFilterStr);
+    let cancelled = false;
+
+    const SELECT = 'id,doi,display_name,cited_by_count,datasets,grants,corresponding_institution_ids,primary_topic,primary_location';
+    // Call A: random sample for rate estimation and breakdowns.
+    const sampleUrl = withMailto(
+      `${OPENALEX_BASE}/works?filter=${baseFilterStr}&sample=200&per-page=200&select=${SELECT}`
+    );
+    // Call B: top-cited works for the prominent list.
+    const topCitedUrl = withMailto(
+      `${OPENALEX_BASE}/works?filter=${baseFilterStr}&sort=cited_by_count:desc&per-page=200&select=${SELECT}`
+    );
+
+    Promise.all([fetchJson(sampleUrl), fetchJson(topCitedUrl)])
+      .then(([sampleJson, topJson]) => {
+        if (cancelled) return;
+        const sample = sampleJson?.results || [];
+        const top = topJson?.results || [];
+
+        // === Rate + citation contrast, from the sample ===
+        const withDatasets = sample.filter((w) => Array.isArray(w.datasets) && w.datasets.length > 0);
+        const withoutDatasets = sample.filter((w) => !Array.isArray(w.datasets) || w.datasets.length === 0);
+        const rate = sample.length > 0 ? withDatasets.length / sample.length : 0;
+        const meanCitesWith = withDatasets.length > 0
+          ? withDatasets.reduce((s, w) => s + (w.cited_by_count || 0), 0) / withDatasets.length
+          : 0;
+        const meanCitesWithout = withoutDatasets.length > 0
+          ? withoutDatasets.reduce((s, w) => s + (w.cited_by_count || 0), 0) / withoutDatasets.length
+          : 0;
+
+        // === Funder breakdown ===
+        // For each funder id appearing in the sample, count how many works
+        // include that funder and how many of those have datasets. Compute
+        // rate. Keep only funders with at least a minimum sample size, so the
+        // rates aren't dominated by 1-of-2 flukes.
+        const MIN_FUNDER_SAMPLE = 5;
+        const funderStats = new Map();
+        for (const w of sample) {
+          const funders = (w.grants || []).map((g) => g.funder).filter(Boolean);
+          const uniqueFunders = [...new Set(funders)];
+          const hasData = Array.isArray(w.datasets) && w.datasets.length > 0;
+          for (const fId of uniqueFunders) {
+            const label = (w.grants || []).find((g) => g.funder === fId)?.funder_display_name || 'Unknown funder';
+            const cur = funderStats.get(fId) || { total: 0, withData: 0, label };
+            cur.total += 1;
+            if (hasData) cur.withData += 1;
+            funderStats.set(fId, cur);
+          }
+        }
+        const funderRates = [...funderStats.entries()]
+          .filter(([, v]) => v.total >= MIN_FUNDER_SAMPLE)
+          .map(([id, v]) => ({ key: id, label: v.label, total: v.total, withData: v.withData, rate: v.withData / v.total }))
+          .sort((a, b) => b.rate - a.rate || b.total - a.total)
+          .slice(0, 10);
+
+        // === Institution breakdown (corresponding-author institutions) ===
+        const MIN_INST_SAMPLE = 3;
+        const instStats = new Map();
+        const instLabels = new Map();
+        for (const w of sample) {
+          const insts = w.corresponding_institution_ids || [];
+          const uniqueInsts = [...new Set(insts)];
+          const hasData = Array.isArray(w.datasets) && w.datasets.length > 0;
+          for (const iId of uniqueInsts) {
+            const cur = instStats.get(iId) || { total: 0, withData: 0 };
+            cur.total += 1;
+            if (hasData) cur.withData += 1;
+            instStats.set(iId, cur);
+          }
+        }
+        // The sample doesn't carry institution labels directly; the corresponding_institution_ids
+        // are just OpenAlex IDs. To attach a display name we can either fire a bulk institution
+        // fetch, or fall back to showing the trimmed ID. For a first pass, use the ID's suffix
+        // as a placeholder label until we resolve.
+        const instRates = [...instStats.entries()]
+          .filter(([, v]) => v.total >= MIN_INST_SAMPLE)
+          .map(([id, v]) => ({ key: id, label: id.replace(/^https?:\/\/openalex\.org\//, ''), total: v.total, withData: v.withData, rate: v.withData / v.total }))
+          .sort((a, b) => b.rate - a.rate || b.total - a.total)
+          .slice(0, 15);
+
+        // Batch-resolve institution names via one /institutions?filter=openalex:I1|I2|...
+        // request. Cap at 50 IDs per request (OpenAlex OR limit); we have at most 15 here.
+        const ids = instRates.map((r) => r.key.replace(/^https?:\/\/openalex\.org\//, '')).join('|');
+        const resolveUrl = ids
+          ? withMailto(`${OPENALEX_BASE}/institutions?filter=openalex:${ids}&per-page=50&select=id,display_name`)
+          : null;
+
+        // === Prominent works with datasets ===
+        const prominentWithData = top
+          .filter((w) => Array.isArray(w.datasets) && w.datasets.length > 0)
+          .slice(0, 20)
+          .map((w) => ({
+            key: w.id,
+            doi: w.doi,
+            title: w.display_name || 'Untitled',
+            citations: w.cited_by_count || 0,
+            datasetsCount: (w.datasets || []).length,
+            venue: w.primary_location?.source?.display_name,
+            year: w.publication_year,
+          }));
+
+        // Resolve institution labels (best-effort; failure just leaves the ID as label).
+        const finalize = (resolvedMap) => {
+          if (cancelled) return;
+          const instRatesFinal = instRates.map((r) => {
+            const label = resolvedMap.get(r.key) || r.label;
+            return { ...r, label };
+          });
+          setData({
+            status: 'ready',
+            sampleSize: sample.length,
+            rate,
+            withDatasetsCount: withDatasets.length,
+            withoutDatasetsCount: withoutDatasets.length,
+            meanCitesWith,
+            meanCitesWithout,
+            funderRates,
+            instRates: instRatesFinal,
+            prominentWithData,
+            promSample: top.length,
+          });
+        };
+        if (resolveUrl) {
+          fetchJson(resolveUrl).then((rj) => {
+            const map = new Map();
+            for (const inst of (rj?.results || [])) {
+              map.set(inst.id, inst.display_name);
+            }
+            finalize(map);
+          }).catch(() => finalize(new Map()));
+        } else {
+          finalize(new Map());
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setData({ status: 'error', error: err.message });
+      });
+
+    return () => { cancelled = true; };
+  }, [baseFilterStr]);
+
+  // Invalidate cache when the base filter changes (country, filter chips, etc).
+  React.useEffect(() => {
+    if (cachedFor !== null && cachedFor !== baseFilterStr) {
+      setData({ status: 'idle' });
+      setCachedFor(null);
+    }
+  }, [baseFilterStr, cachedFor]);
+
+  return (
+    <Card className="p-5 lg:col-span-12">
+      <SectionTitle
+        icon={Database}
+        kicker="Research data availability"
+        title="Papers with a linked dataset in OpenAlex"
+        hint="Sourced from Crossref and DataCite relations"
+      />
+      <p
+        className="-mt-2 mb-4 max-w-4xl"
+        style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
+      >
+        Data availability here is measured as papers with at least one linked dataset record in OpenAlex, sourced from
+        Crossref and DataCite relations. This is an <strong>undercount</strong>: many papers with actual open data don't have
+        their linkage propagated to OpenAlex, so treat these numbers as a lower bound, not an authoritative rate.
+        Statistics are computed from a random sample of 200 works within the current filter selection.
+      </p>
+
+      {data.status === 'idle' && (
+        <div className="rounded-sm px-4 py-6 text-center" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, marginBottom: 12 }}>
+            This section loads on demand.
+          </div>
+          <button
+            onClick={load}
+            className="rounded-sm px-4 py-2"
+            style={{
+              background: PALETTE.ink,
+              color: PALETTE.cream,
+              fontFamily: FONT_MONO,
+              fontSize: 12,
+              letterSpacing: '0.04em',
+              border: `1px solid ${PALETTE.ink}`,
+            }}
+          >
+            Load data availability analysis
+          </button>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, marginTop: 10 }}>
+            Fires 3 API calls (sample + top-cited + institution names).
+          </div>
+        </div>
+      )}
+
+      {data.status === 'loading' && (
+        <div className="flex items-center gap-2 rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <Loader2 size={14} className="animate-spin" />
+          <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+            Sampling works, computing rates, resolving institution names…
+          </span>
+        </div>
+      )}
+
+      {data.status === 'error' && (
+        <div className="rounded-sm px-4 py-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}`, color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
+          Could not load: {data.error}. <button onClick={load} style={{ textDecoration: 'underline', color: PALETTE.ink, fontFamily: FONT_MONO, fontSize: 12 }}>Retry</button>
+        </div>
+      )}
+
+      {data.status === 'ready' && (
+        <>
+          {/* Top stat cards: three metrics side by side */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 mb-5">
+            <div className="rounded-sm px-4 py-3" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.muted, letterSpacing: '0.14em' }} className="uppercase">Share with linked dataset</div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 28, fontWeight: 500, fontStyle: 'italic', color: PALETTE.ink, lineHeight: 1.15 }} className="mt-0.5">
+                {(data.rate * 100).toFixed(1)}%
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }}>
+                {data.withDatasetsCount} of {data.sampleSize} sampled works
+              </div>
+            </div>
+            <div className="rounded-sm px-4 py-3" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.muted, letterSpacing: '0.14em' }} className="uppercase">Mean cites · with dataset</div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 28, fontWeight: 500, fontStyle: 'italic', color: PALETTE.forest, lineHeight: 1.15 }} className="mt-0.5">
+                {data.meanCitesWith.toFixed(1)}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }}>
+                {data.withDatasetsCount} works
+              </div>
+            </div>
+            <div className="rounded-sm px-4 py-3" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.muted, letterSpacing: '0.14em' }} className="uppercase">Mean cites · without dataset</div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 28, fontWeight: 500, fontStyle: 'italic', color: PALETTE.charcoal, lineHeight: 1.15 }} className="mt-0.5">
+                {data.meanCitesWithout.toFixed(1)}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }}>
+                {data.withoutDatasetsCount} works
+              </div>
+            </div>
+          </div>
+
+          {/* Two side-by-side breakdowns: funders and institutions */}
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 mb-5">
+            <div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }} className="uppercase mb-2">
+                Sharing rate by funder · top 10
+              </div>
+              {data.funderRates.length === 0 ? (
+                <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.muted }} className="px-3 py-6">
+                  Not enough funder data in the sample to build reliable rates.
+                </div>
+              ) : (
+                <ol className="space-y-1.5">
+                  {data.funderRates.map((f, i) => {
+                    const widthPct = f.rate * 100;
+                    return (
+                      <li key={f.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '20px 1fr 90px' }}>
+                        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, textAlign: 'right' }}>{i + 1}</span>
+                        <div className="relative" style={{ height: 22, background: PALETTE.cream, borderRadius: 2 }}>
+                          <div
+                            style={{
+                              position: 'absolute', left: 0, top: 0, bottom: 0,
+                              width: `${Math.max(widthPct, 2)}%`,
+                              background: PALETTE.forest,
+                              opacity: 0.22,
+                              borderRadius: 2,
+                            }}
+                          />
+                          <span
+                            className="absolute inset-y-0 left-2 right-2 flex items-center"
+                            style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.ink, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}
+                            title={f.label}
+                          >
+                            {f.label}
+                          </span>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
+                            {(f.rate * 100).toFixed(1)}%
+                          </div>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>
+                            {f.withData}/{f.total}
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </div>
+            <div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }} className="uppercase mb-2">
+                Sharing rate by institution · top 15 · corresponding
+              </div>
+              {data.instRates.length === 0 ? (
+                <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.muted }} className="px-3 py-6">
+                  Not enough corresponding-institution data in the sample.
+                </div>
+              ) : (
+                <ol className="space-y-1.5">
+                  {data.instRates.map((f, i) => {
+                    const widthPct = f.rate * 100;
+                    return (
+                      <li key={f.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '20px 1fr 90px' }}>
+                        <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, textAlign: 'right' }}>{i + 1}</span>
+                        <div className="relative" style={{ height: 22, background: PALETTE.cream, borderRadius: 2 }}>
+                          <div
+                            style={{
+                              position: 'absolute', left: 0, top: 0, bottom: 0,
+                              width: `${Math.max(widthPct, 2)}%`,
+                              background: PALETTE.navy,
+                              opacity: 0.22,
+                              borderRadius: 2,
+                            }}
+                          />
+                          <span
+                            className="absolute inset-y-0 left-2 right-2 flex items-center"
+                            style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.ink, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}
+                            title={f.label}
+                          >
+                            {f.label}
+                          </span>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
+                            {(f.rate * 100).toFixed(1)}%
+                          </div>
+                          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>
+                            {f.withData}/{f.total}
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </div>
+          </div>
+
+          {/* Prominent works with datasets */}
+          <div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }} className="uppercase mb-2">
+              Prominent works with linked datasets · top {data.prominentWithData.length}
+            </div>
+            {data.prominentWithData.length === 0 ? (
+              <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.muted }} className="px-3 py-4">
+                No works with linked datasets found in the top-{data.promSample} most-cited works.
+              </div>
+            ) : (
+              <ol className="space-y-1">
+                {data.prominentWithData.map((w, i) => (
+                  <li key={w.key} className="rounded-sm px-3 py-2" style={{ background: i % 2 === 0 ? PALETTE.cream : 'transparent', border: `1px solid ${PALETTE.rule}` }}>
+                    <div className="flex items-baseline gap-3">
+                      <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, minWidth: 20 }}>{i + 1}</span>
+                      <div className="flex-1 min-w-0">
+                        <a
+                          href={w.doi || w.key}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.ink, textDecoration: 'none', fontWeight: 500 }}
+                          onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                          onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                        >
+                          {w.title}
+                        </a>
+                        <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }} className="mt-0.5">
+                          {w.venue && <span>{w.venue}</span>}
+                          {w.venue && w.year && <span> · </span>}
+                          {w.year && <span>{w.year}</span>}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, fontWeight: 500 }}>
+                          {fmtFull(w.citations)} cites
+                        </div>
+                        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>
+                          {w.datasetsCount} dataset{w.datasetsCount === 1 ? '' : 's'}
+                        </div>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+};
+
+
 // publishers, and international-collaborator countries for the cited or
 // uncited subset of the active selection. The reader picks the mode
 // (cited or uncited) and the ranking metric (within-entity percentage,
 // or extra count vs expected) via toggles inside the section. The section
 // owns its own data fetch and only loads the active mode, so switching modes
 // triggers a reload rather than carrying both at once.
-const CitationInsightSection = ({ year, country, baseFilterStr, countryInstitutionIds = [], activeFilters = {}, enabled = true, open, onToggle }) => {
+const CitationInsightSection = ({ year, country, baseFilterStr, countryInstitutionIds = [], activeFilters = {} }) => {
   // Minimum works per entity to qualify for ranking. Below this, share percentages
   // are too noisy to be meaningful (e.g. a field with 3 works at 100% cited).
   const MIN_WORKS_FOR_FIELD = 30;
@@ -2009,7 +2576,6 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   }, [mode, sortMode]);
 
   useEffect(() => {
-    if (!enabled) return;
     if (!mode) return;
     let cancelled = false;
     const subsetClause = mode === 'cited' ? 'cited_by_count:>0' : 'cited_by_count:0';
@@ -2153,7 +2719,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
     // loop. Joining to a string gives a stable value-based identity that only
     // changes when the actual roster changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, mode, baseFilterStr, countryInstitutionIds.join(',')]);
+  }, [mode, baseFilterStr, countryInstitutionIds.join(',')]);
 
   // Lazy fetcher for mean-cites-per-work. Fires only when the user activates the
   // 'meanCites' sort mode and the cache for the active tab isn't populated. For
@@ -2167,7 +2733,6 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   // collaborators and citation networks). Tiny entities with extreme means are
   // already filtered out by the min-works threshold.
   useEffect(() => {
-    if (!enabled) return;
     if (sortMode !== 'meanCites') return;
     // Identify the active tab's data and the filter expression for "entity = X"
     // we'll use when fetching per-entity citations.
@@ -2230,7 +2795,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
     });
 
     return () => { cancelled = true; };
-  }, [enabled, sortMode, dimensionTab, mode, baseFilterStr, fields.status, subfields.status, institutions.status, publishers.status, countries.status]);
+  }, [sortMode, dimensionTab, mode, baseFilterStr, fields.status, subfields.status, institutions.status, publishers.status, countries.status]);
 
   const titleMode = mode === 'cited' ? 'cited at least once' : 'still uncited';
   const accent = mode === 'cited' ? PALETTE.rust : PALETTE.muted;
@@ -2340,7 +2905,7 @@ const CitationInsightSection = ({ year, country, baseFilterStr, countryInstituti
   };
 
   return (
-    <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>
+    <Card className="p-5 lg:col-span-12">
       <SectionTitle
         icon={Sparkles}
         kicker="Citation insight"
@@ -3187,1052 +3752,6 @@ const CountryRow = ({ c, active, onClick }) => (
   </button>
 );
 
-// ---------------------------------------------------------------------------
-// APC (Article Processing Charge) spend panel.
-//
-// Reads the precomputed apc_by_publisher.json (produced offline by
-// apc-pipeline/precompute_apc.mjs) and shows estimated national open-access
-// fees by publisher for the years currently selected in the masthead. The
-// figure is a LIST-PRICE CEILING attributed to Thai corresponding authors, not
-// actual spend. See the methods note in the panel and apc-pipeline/README.md.
-//
-// This panel is intentionally decoupled from the live OpenAlex panels: summing
-// APC requires per-work iteration that OpenAlex's group_by cannot do, so the
-// heavy lifting happens in the offline pipeline and this panel just renders the
-// result, refiltered by the selected years.
-const fmtUSD = (n) => '$' + Math.round(n || 0).toLocaleString('en-US');
-const fmtTHB = (n) => '฿' + Math.round(n || 0).toLocaleString('en-US');
-
-// Collapsible dashboard section. Wraps a group of panels under a clickable
-// header that expands/collapses the group. Each section manages its own state.
-const CollapsibleSection = ({ title, subtitle, defaultOpen = true, children }) => {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <section className="mb-3">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="mb-4 flex w-full items-center gap-3 border-b pb-2 text-left"
-        style={{ borderColor: PALETTE.ink, background: 'transparent', cursor: 'pointer' }}
-      >
-        <ChevronDown
-          size={18}
-          style={{ flex: 'none', color: PALETTE.ink, transition: 'transform 0.2s ease', transform: open ? 'none' : 'rotate(-90deg)' }}
-        />
-        <span style={{ fontFamily: FONT_DISPLAY, fontStyle: 'italic', fontSize: 24, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }}>
-          {title}
-        </span>
-        {subtitle && (
-          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.12em' }} className="uppercase">
-            {subtitle}
-          </span>
-        )}
-        <span style={{ marginLeft: 'auto', fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.1em' }} className="uppercase">
-          {open ? 'Hide' : 'Show'}
-        </span>
-      </button>
-      {open && children}
-    </section>
-  );
-};
-
-// Rank-over-time bump chart: each line is one entity's rank across the year
-// window. Used by the Publishing channels panel's "Rank over time" tab.
-const RankBumpChart = ({ rows, years, topN = 15, status, accentColor }) => {
-  const W = 720;
-  const H = 360;
-  const PAD = { top: 28, right: 220, bottom: 36, left: 36 };
-  const plotW = W - PAD.left - PAD.right;
-  const plotH = H - PAD.top - PAD.bottom;
-  const [hover, setHover] = React.useState(null);
-
-  if (status === 'loading') {
-    return (
-      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
-        <Loader2 size={14} className="animate-spin" />
-        <span className="ml-2">Computing rank trajectories…</span>
-      </div>
-    );
-  }
-  if (status === 'error') {
-    return (
-      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
-        Could not load rank data.
-      </div>
-    );
-  }
-  if (!rows || rows.length === 0 || !years || years.length === 0) {
-    return (
-      <div className="flex h-[360px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
-        Not enough data to build a rank chart.
-      </div>
-    );
-  }
-
-  const xFor = (year) => {
-    if (years.length === 1) return PAD.left + plotW / 2;
-    const idx = years.indexOf(year);
-    return PAD.left + (idx / (years.length - 1)) * plotW;
-  };
-  const yFor = (rank) => PAD.top + ((rank - 1) / Math.max(1, topN - 1)) * plotH;
-
-  const lastYear = years[years.length - 1];
-  const sortedByLast = [...rows].sort((a, b) => {
-    const ra = a.ranks[lastYear] ?? Infinity;
-    const rb = b.ranks[lastYear] ?? Infinity;
-    return ra - rb;
-  });
-  const colorRamp = [
-    '#a04f1f', '#b56423', '#c87c30', '#cb8d4a', '#c69a64',
-    '#a89878', '#888a82', '#6e8488', '#577e8e', '#477694',
-    '#3a6f93', '#2f6890', '#2c5f7d', '#2b5469', '#2c4a55',
-  ];
-  const colorFor = (key) => {
-    const idx = sortedByLast.findIndex((r) => r.key === key);
-    if (idx < 0) return PALETTE.muted;
-    return colorRamp[Math.min(idx, colorRamp.length - 1)];
-  };
-
-  return (
-    <div className="relative" style={{ width: '100%' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
-        {[1, 5, 10, 15].filter((r) => r <= topN).map((r) => (
-          <g key={`y-${r}`}>
-            <line x1={PAD.left} x2={W - PAD.right} y1={yFor(r)} y2={yFor(r)} stroke={PALETTE.rule} strokeDasharray="2 4" />
-            <text x={PAD.left - 6} y={yFor(r) + 3} textAnchor="end" style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}>#{r}</text>
-          </g>
-        ))}
-        {years.map((y) => (
-          <g key={`x-${y}`}>
-            <text x={xFor(y)} y={PAD.top - 10} textAnchor="middle" style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.04em', fill: PALETTE.charcoal, fontWeight: 500 }}>{y}</text>
-            <line x1={xFor(y)} x2={xFor(y)} y1={PAD.top} y2={H - PAD.bottom} stroke={PALETTE.rule} strokeDasharray="1 5" opacity="0.4" />
-          </g>
-        ))}
-        <text x={14} y={PAD.top + plotH / 2} textAnchor="middle" transform={`rotate(-90, 14, ${PAD.top + plotH / 2})`} style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}>RANK</text>
-        {sortedByLast.map((row) => {
-          const segments = [];
-          for (let i = 0; i < years.length - 1; i++) {
-            const y1 = years[i];
-            const y2 = years[i + 1];
-            const r1 = row.ranks[y1];
-            const r2 = row.ranks[y2];
-            if (r1 == null || r2 == null) {
-              const fakeR1 = r1 ?? topN + 1;
-              const fakeR2 = r2 ?? topN + 1;
-              segments.push({ x1: xFor(y1), y1: yFor(fakeR1), x2: xFor(y2), y2: yFor(fakeR2), faded: true });
-            } else {
-              segments.push({ x1: xFor(y1), y1: yFor(r1), x2: xFor(y2), y2: yFor(r2), faded: false });
-            }
-          }
-          const color = colorFor(row.key);
-          const isHovered = hover && hover.key === row.key;
-          return (
-            <g key={row.key} onMouseEnter={() => setHover(row)} onMouseLeave={() => setHover(null)} style={{ cursor: 'pointer' }}>
-              {segments.map((s, i) => (
-                <line key={`hit-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke="transparent" strokeWidth="14" />
-              ))}
-              {segments.map((s, i) => (
-                <line key={`line-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={color} strokeWidth={isHovered ? 3 : 2} strokeOpacity={s.faded ? 0.25 : (hover && !isHovered ? 0.25 : 0.85)} strokeLinecap="round" />
-              ))}
-              {years.map((y) => {
-                const r = row.ranks[y];
-                if (r == null) return null;
-                return (
-                  <circle key={`pt-${y}`} cx={xFor(y)} cy={yFor(r)} r={isHovered ? 4.5 : 3} fill={color} stroke={PALETTE.paper} strokeWidth="1.2" fillOpacity={hover && !isHovered ? 0.35 : 1} />
-                );
-              })}
-              {(() => {
-                let labelYear = null;
-                for (let i = years.length - 1; i >= 0; i--) {
-                  if (row.ranks[years[i]] != null) { labelYear = years[i]; break; }
-                }
-                if (labelYear == null) return null;
-                const r = row.ranks[labelYear];
-                return (
-                  <text x={W - PAD.right + 10} y={yFor(r) + 3} style={{ fontFamily: FONT_BODY, fontSize: isHovered ? 12 : 11, fill: hover && !isHovered ? PALETTE.muted : PALETTE.ink, fontWeight: isHovered ? 600 : 400 }}>
-                    {row.label.length > 28 ? row.label.slice(0, 27) + '…' : row.label}
-                  </text>
-                );
-              })()}
-            </g>
-          );
-        })}
-      </svg>
-      {hover && (
-        <div className="pointer-events-none absolute rounded-sm px-3 py-2" style={{ background: PALETTE.ink, color: PALETTE.cream, fontFamily: FONT_BODY, fontSize: 11.5, lineHeight: 1.45, border: `1px solid ${PALETTE.ink}`, boxShadow: '0 4px 12px rgba(0,0,0,0.18)', top: 8, right: 8, maxWidth: 300 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>{hover.label}</div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, opacity: 0.9 }}>
-            {years.map((y) => {
-              const r = hover.ranks[y];
-              const c = hover.counts[y];
-              return (
-                <div key={y}>
-                  {y}: {r != null ? `#${r}` : '—'}
-                  {c != null && <span style={{ opacity: 0.7 }}> ({fmtFull(c)} works)</span>}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-// FX + client-side pricing helpers (mirror apc-pipeline/precompute_apc.mjs).
-const APC_GBP_USD = (apcData.currency && apcData.currency.gbp_usd) || 1.27;
-const APC_EUR_USD = (apcData.currency && apcData.currency.eur_usd) || 1.08;
-const APC_AVG_THB = 34.0;
-const APC_MAX_LIVE = 6000; // cap on works priced live per selection
-const apcStripIssn = (s) => (typeof s === 'string' ? s.toUpperCase().replace(/[^0-9X]/g, '') : '');
-const APC_STOP = /\b(the|a|an|of|and|for|in|on)\b/g;
-const apcNormTitle = (t) => {
-  if (!t) return null;
-  let s = String(t).toLowerCase().replace(/&/g, ' and ');
-  s = s.replace(/[^a-z0-9 ]+/g, ' ').replace(APC_STOP, ' ').replace(/\s+/g, ' ').trim();
-  return s || null;
-};
-const apcArrUsd = (a) => {
-  if (!a) return null;
-  if (a[0] != null) return a[0];
-  if (a[2] != null) return Math.round(a[2] * APC_GBP_USD);
-  if (a[1] != null) return Math.round(a[1] * APC_EUR_USD);
-  return null;
-};
-const apcObjUsd = (o) => {
-  if (!o) return null;
-  if (o.usd != null) return o.usd;
-  if (o.gbp != null) return Math.round(o.gbp * APC_GBP_USD);
-  if (o.eur != null) return Math.round(o.eur * APC_EUR_USD);
-  return null;
-};
-const apcDefaultsRe = (publisherDefaults || []).map((d) => ({ ...d, re: new RegExp(d.match, 'i') }));
-const apcPriceWork = (w) => {
-  const src = (w.primary_location && w.primary_location.source) || {};
-  const oa = (w.open_access && w.open_access.oa_status) || null;
-  const issns = [];
-  if (src.issn_l) issns.push(apcStripIssn(src.issn_l));
-  for (const i of (src.issn || [])) issns.push(apcStripIssn(i));
-  for (const n of issns) { const u = apcArrUsd(apcPricing.issn[n]); if (u != null) return u; }
-  const tn = apcNormTitle(src.display_name);
-  if (tn) { const u = apcArrUsd(apcPricing.title[tn]); if (u != null) return u; }
-  const host = src.host_organization_name || '';
-  for (const d of apcDefaultsRe) {
-    if (d.re.test(host)) {
-      const u = apcObjUsd(oa === 'gold' ? d.gold : oa === 'hybrid' ? d.hybrid : null);
-      if (u != null) return u;
-    }
-  }
-  if (w.apc_list && w.apc_list.value_usd != null) return w.apc_list.value_usd;
-  if (w.apc_paid && w.apc_paid.value_usd != null) return w.apc_paid.value_usd;
-  return null;
-};
-const apcThaiCorr = (authorships) => {
-  const isTH = (a) => (a.countries || []).includes('TH') || (a.institutions || []).some((i) => i.country_code === 'TH');
-  const corr = (authorships || []).filter((a) => a.is_corresponding);
-  if (corr.length) return corr.some(isTH);
-  const first = (authorships || []).find((a) => a.author_position === 'first') || (authorships || [])[0];
-  return first ? isTH(first) : false;
-};
-
-// Gold-vs-hybrid proportion bar.
-const OaSplit = ({ gold, hybrid }) => {
-  const tot = (gold || 0) + (hybrid || 0);
-  if (tot <= 0) return null;
-  const gp = (gold / tot) * 100, hp = (hybrid / tot) * 100;
-  return (
-    <div className="mb-5">
-      <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase mb-2">
-        Gold vs hybrid open access
-      </div>
-      <div className="flex w-full overflow-hidden" style={{ height: 26, borderRadius: 3, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ width: `${gp}%`, background: OA_COLORS.gold, display: 'flex', alignItems: 'center', justifyContent: 'center', color: PALETTE.ink, fontFamily: FONT_MONO, fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden' }}
-             title={`Gold: ${fmtUSD(gold)} (${gp.toFixed(1)}%)`}>
-          {gp > 12 ? `Gold ${gp.toFixed(0)}%` : ''}
-        </div>
-        <div style={{ width: `${hp}%`, background: OA_COLORS.hybrid, display: 'flex', alignItems: 'center', justifyContent: 'center', color: PALETTE.paper, fontFamily: FONT_MONO, fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden' }}
-             title={`Hybrid: ${fmtUSD(hybrid)} (${hp.toFixed(1)}%)`}>
-          {hp > 12 ? `Hybrid ${hp.toFixed(0)}%` : ''}
-        </div>
-      </div>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">
-        Gold {fmtUSD(gold)} · Hybrid {fmtUSD(hybrid)}
-      </div>
-    </div>
-  );
-};
-
-const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle }) => {
-  const apcReady = apcData && apcData.status !== 'placeholder' && (apcData.by_publisher || []).length > 0;
-  const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
-  const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
-  const filterActive = hasChips || hasInst;
-  const instTooMany = hasInst && instFilterIds.length > 90;
-
-  const usedYears = ((years || []).filter((y) => (apcData.years || []).includes(y)));
-  const yearsForNat = usedYears.length ? usedYears : (apcData.years || []);
-
-  // National precomputed view, summed over the selected years.
-  const national = useMemo(() => {
-    if (!apcReady) return null;
-    let tUsd = 0, tThb = 0, tWorks = 0, tPriced = 0, gold = 0, hybrid = 0;
-    const rows = (apcData.by_publisher || []).map((p) => {
-      let usd = 0, thb = 0, works = 0, priced = 0, g = 0, h = 0;
-      for (const y of yearsForNat) {
-        const cell = (p.by_year || {})[y] || (p.by_year || {})[String(y)];
-        if (cell) { usd += cell.usd || 0; thb += cell.thb || 0; works += cell.works || 0; priced += cell.priced || 0; g += cell.gold || 0; h += cell.hybrid || 0; }
-      }
-      tUsd += usd; tThb += thb; tWorks += works; tPriced += priced;
-      return { key: p.publisher, label: cleanLabel(p.publisher, 34), usd, works, priced, gold: g, hybrid: h, basis: p.basis };
-    }).filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
-    const oa = (apcData.by_oa_status && apcData.by_oa_status.by_year) || {};
-    for (const y of yearsForNat) { const c = oa[y] || oa[String(y)]; if (c) { gold += c.gold || 0; hybrid += c.hybrid || 0; } }
-    return { rows, totalUsd: tUsd, totalThb: tThb, totalWorks: tWorks, totalPriced: tPriced, gold, hybrid };
-  }, [apcReady, JSON.stringify(yearsForNat)]);
-
-  // Live view, computed from OpenAlex for the exact current selection.
-  const [live, setLive] = useState({ status: 'idle' });
-  useEffect(() => {
-    // APC estimation is calibrated for Thailand only, so never run live pricing
-    // for another country (it would mis-attribute via the Thai-author check).
-    if (country !== 'TH') { setLive({ status: 'idle' }); return; }
-    if (!filterActive) { setLive({ status: 'idle' }); return; }
-    if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        setLive({ status: 'loading' });
-        let filter = buildFilterString(country, years, filters) + ',open_access.oa_status:gold|hybrid';
-        if (hasInst) filter += ',authorships.institutions.id:' + instFilterIds.join('|');
-        const cj = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&per-page=1`));
-        const count = (cj.meta && cj.meta.count) || 0;
-        if (cancelled) return;
-        if (count > APC_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
-        const SEL = 'id,open_access,primary_location,authorships,apc_list,apc_paid';
-        const agg = {};
-        let usd = 0, works = 0, priced = 0, gold = 0, hybrid = 0;
-        // Fetch all pages in parallel. The selection is under the cap (< 10000),
-        // so OpenAlex numbered paging is valid and the pages don't need to run
-        // sequentially the way cursor paging does. The shared rate limiter still
-        // paces the sends, but no request waits on the previous one's response.
-        const pages = Math.min(50, Math.max(1, Math.ceil(count / 200)));
-        const pageResults = await Promise.all(
-          Array.from({ length: pages }, (_, i) =>
-            fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&page=${i + 1}`))
-              .then((j) => j.results || [])
-              .catch(() => []))
-        );
-        if (cancelled) return;
-        for (const res of pageResults) {
-          for (const w of res) {
-            if (!apcThaiCorr(w.authorships)) continue;
-            works++;
-            const oa = (w.open_access && w.open_access.oa_status) || null;
-            const src = (w.primary_location && w.primary_location.source) || {};
-            const pub = src.host_organization_name || 'Unknown / no publisher';
-            const p = apcPriceWork(w);
-            if (!agg[pub]) agg[pub] = { usd: 0, works: 0, priced: 0, gold: 0, hybrid: 0 };
-            agg[pub].works++;
-            if (p != null) {
-              priced++; usd += p; agg[pub].usd += p; agg[pub].priced++;
-              if (oa === 'gold') { gold += p; agg[pub].gold += p; } else if (oa === 'hybrid') { hybrid += p; agg[pub].hybrid += p; }
-            }
-          }
-        }
-        if (cancelled) return;
-        const rows = Object.entries(agg).map(([key, v]) => ({ key, label: cleanLabel(key, 34), usd: v.usd, works: v.works, priced: v.priced, gold: v.gold, hybrid: v.hybrid }))
-          .filter((r) => r.usd > 0).sort((a, b) => b.usd - a.usd);
-        setLive({ status: 'ready', totalUsd: usd, totalThb: usd * APC_AVG_THB, totalWorks: works, totalPriced: priced, gold, hybrid, rows });
-      } catch (e) {
-        if (!cancelled) setLive({ status: 'error', error: (e && e.message) || 'Live pricing failed' });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
-
-  const header = (hint) => (
-    <SectionTitle icon={Banknote} kicker="Open access fees" title="Estimated APC spend by publisher" hint={hint} />
-  );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>{children}</Card>;
-
-  // Thailand only. The precomputed national totals are Thai, the
-  // corresponding-author attribution hardcodes TH, and the price reference
-  // reflects what Thai authors pay (Thailand is upper-middle-income, so no
-  // automatic LMIC waivers). For any other country we cannot produce a valid
-  // estimate, so we say so plainly rather than show Thailand's numbers or
-  // mis-attributed live pricing.
-  if (country !== 'TH') {
-    return wrap(<>
-      {header('Thailand only')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
-        <p style={{ marginBottom: 8 }}>APC spend estimation is available for Thailand only. The price reference and corresponding-author attribution were calibrated for {countryName('TH')}, so these figures would not be valid for {countryName(country)}.</p>
-        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.muted }}>Switch the country selector back to Thailand to see estimated open access fees.</p>
-      </div>
-    </>);
-  }
-
-  // Placeholder: no precompute and no active filter.
-  if (!apcReady && !filterActive) {
-    return wrap(<>
-      {header('Awaiting precompute')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
-        <p style={{ marginBottom: 8 }}>This panel shows estimated article processing charges paid to each publisher. The national data has not been computed yet.</p>
-        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>Run <strong>node apc-pipeline/precompute_apc.mjs</strong> with an OpenAlex API key, then reload. Filtering re-prices live.</p>
-      </div>
-    </>);
-  }
-
-  // Live status screens.
-  if (filterActive && live.status === 'loading') {
-    return wrap(<>{header('Live · pricing current selection…')}<div className="px-2 py-6"><SkeletonBars rows={6} /></div></>);
-  }
-  if (filterActive && live.status === 'toolarge') {
-    const msg = live.reason === 'inst'
-      ? `This institution-type selection spans too many institutions (${(instFilterIds || []).length}) to price live. Pick a narrower subtype or also select a discipline.`
-      : `This selection covers ${(live.count || 0).toLocaleString()} works, above the ${APC_MAX_LIVE.toLocaleString()} live-pricing cap. Narrow the filter (a specific institution, subfield, or fewer years) to price it live.`;
-    return wrap(<>{header('Selection too large for live pricing')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>{msg}</div>
-    </>);
-  }
-  if (filterActive && live.status === 'error') {
-    return wrap(<>{header('Live pricing unavailable')}
-      <div className="flex flex-col items-center justify-center px-4 py-10 text-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
-        <AlertCircle size={20} className="mb-2" />
-        <div style={{ fontSize: 13 }}>Could not price this selection live.</div>
-        <div style={{ fontSize: 11, color: PALETTE.muted, marginTop: 4 }}>{live.error}</div>
-      </div>
-    </>);
-  }
-
-  const v = filterActive ? (live.status === 'ready' ? live : null) : national;
-  if (!v) return wrap(<>{header('Open access fees')}<div className="px-2 py-6"><SkeletonBars rows={6} /></div></>);
-
-  const matchRate = v.totalWorks ? (v.totalPriced / v.totalWorks) : 0;
-  const yearLabel = yearsForNat.length === (apcData.years || []).length
-    ? `${Math.min(...yearsForNat)}–${Math.max(...yearsForNat)}` : yearsForNat.join(', ');
-  const hint = filterActive
-    ? `Live · current selection · ${yearLabel}`
-    : `National · precomputed · ${yearLabel}`;
-  const maxUsd = v.rows.length ? v.rows[0].usd : 1;
-  const TOP = 20;
-  const shown = v.rows.slice(0, TOP);
-
-  return wrap(<>
-    {header(hint)}
-    <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
-      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (USD)</div>
-        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }} className="mt-2">{fmtUSD(v.totalUsd)}</div>
-      </div>
-      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Estimated APC (THB)</div>
-        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.burgundy, lineHeight: 1.1 }} className="mt-2">{fmtTHB(v.totalThb)}</div>
-      </div>
-      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Price match rate</div>
-        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.teal, lineHeight: 1.1 }} className="mt-2">{(matchRate * 100).toFixed(1)}%</div>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(v.totalPriced)} of {fmtFull(v.totalWorks)} APC-bearing works priced</div>
-      </div>
-    </div>
-
-    <OaSplit gold={v.gold} hybrid={v.hybrid} />
-
-    <div className="space-y-2">
-      {shown.map((r) => (
-        <div key={r.key} className="flex items-center gap-3">
-          <div style={{ width: 200, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.key}>{r.label}</div>
-          <div className="flex-1">
-            <div className="flex" style={{ height: 18, borderRadius: 2, overflow: 'hidden', width: `${Math.max(2, (r.usd / maxUsd) * 100)}%`, transition: 'width 0.4s ease' }}
-                 title={`${fmtUSD(r.usd)} (Gold ${fmtUSD(r.gold || 0)}, Hybrid ${fmtUSD(r.hybrid || 0)})`}>
-              <div style={{ width: `${r.usd ? ((r.gold || 0) / r.usd) * 100 : 0}%`, background: OA_COLORS.gold }} />
-              <div style={{ width: `${r.usd ? ((r.hybrid || 0) / r.usd) * 100 : 0}%`, background: OA_COLORS.hybrid }} />
-            </div>
-          </div>
-          <div style={{ width: 220, fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, flex: 'none' }}>
-            {fmtUSD(r.usd)}
-            <span style={{ color: PALETTE.muted }}> · {r.priced}/{r.works}</span>
-            {r.basis && (
-              <span title="How this publisher was priced: by ISSN is most precise; by title and flat rate are estimates."
-                style={{ marginLeft: 6, padding: '1px 5px', borderRadius: 2, fontSize: 9, letterSpacing: '0.04em', border: `1px solid ${PALETTE.rule}`, color: r.basis === 'by ISSN' ? PALETTE.teal : PALETTE.rust, background: PALETTE.cream }}>
-                {r.basis}
-              </span>
-            )}
-          </div>
-        </div>
-      ))}
-      {v.rows.length > TOP && (
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="pt-1">Showing top {TOP} of {v.rows.length} publishers by estimated spend.</div>
-      )}
-      {v.rows.length === 0 && (
-        <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-4">No priced open access works in this selection.</div>
-      )}
-    </div>
-
-    <div className="mt-5 rounded-sm px-4 py-3" style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }} className="uppercase mb-2">Method &amp; caveats</div>
-      <ul style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.6, listStyle: 'disc', paddingLeft: 18 }}>
-        {(apcData.caveats || []).map((c, i) => (<li key={i} style={{ marginBottom: 3 }}>{c}</li>))}
-      </ul>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-2">
-        {filterActive ? 'Live: priced from OpenAlex for the current selection (THB at an average rate).' : 'National: precomputed totals (THB at per-year rates).'} Prices from curated publisher lists plus OpenAlex apc_list/DOAJ.
-      </div>
-    </div>
-  </>);
-};
-
-// ===== SJR "Journal placement" (quartile) panel ==============================
-// Mirrors ApcPanel: precomputed national view (sjr_by_quartile.json) when no
-// filter is active, live in-browser recompute when a filter is active using the
-// bundled sjr_ranking.json (compact per-ISSN quartile-per-year strings).
-const SJR_YEARS = sjrRanking.years || [];
-const SJR_ISSN = sjrRanking.issn || {};
-const SJR_BUNDLE_READY = SJR_YEARS.length > 0 && Object.keys(SJR_ISSN).length > 0;
-const SJR_NAT_READY = sjrByQuartile && sjrByQuartile.status !== 'placeholder'
-  && ((sjrByQuartile.overall && sjrByQuartile.overall.works) || 0) > 0;
-// Citation-impact precompute presence: the same JSON, augmented with the
-// `impact_by_quartile` block added in the extended precompute_sjr.mjs.
-const SJR_IMPACT_READY = SJR_NAT_READY
-  && sjrByQuartile.impact_by_quartile
-  && sjrByQuartile.impact_by_quartile.overall;
-const SJR_MAX_LIVE = 8000;
-const SJR_YEAR_INDEX = new Map(SJR_YEARS.map((y, i) => [y, i]));
-const QUARTILE_COLORS = { q1: '#2f6890', q2: '#5b8aa6', q3: '#c69a64', q4: '#a55a2c', unranked: '#9b9389' };
-const QUARTILE_LABELS = { q1: 'Q1', q2: 'Q2', q3: 'Q3', q4: 'Q4', unranked: 'Unranked / not in Scopus' };
-
-const sjrNearestYear = (year) => {
-  if (SJR_YEAR_INDEX.has(year)) return year;
-  let best = SJR_YEARS[0], dist = Infinity;
-  for (const y of SJR_YEARS) { const d = Math.abs(y - year); if (d < dist) { dist = d; best = y; } }
-  return best;
-};
-const sjrStripIssn = (s) => (typeof s === 'string' ? s.toUpperCase().replace(/[^0-9X]/g, '') : '');
-const sjrHyphen = (s) => (s.length === 8 ? s.slice(0, 4) + '-' + s.slice(4) : null);
-// Returns quartile 1..4, or 0 if unranked / not in the SJR reference.
-const sjrQuartileForWork = (w, year) => {
-  if (!SJR_BUNDLE_READY) return 0;
-  const src = (w.primary_location && w.primary_location.source) || {};
-  const issns = [];
-  if (src.issn_l) issns.push(sjrHyphen(sjrStripIssn(src.issn_l)));
-  for (const i of (src.issn || [])) issns.push(sjrHyphen(sjrStripIssn(i)));
-  const idx = SJR_YEAR_INDEX.get(sjrNearestYear(year));
-  for (const issn of issns) {
-    if (!issn) continue;
-    const str = SJR_ISSN[issn];
-    if (str && idx != null && idx < str.length) {
-      const q = parseInt(str[idx], 10);
-      if (q >= 1 && q <= 4) return q;
-    }
-  }
-  return 0;
-};
-const sjrPct = (n, d) => (d ? ((n / d) * 100) : 0);
-const sjrBarData = (agg) => [
-  { key: 'q1', label: QUARTILE_LABELS.q1, value: agg.q1 || 0 },
-  { key: 'q2', label: QUARTILE_LABELS.q2, value: agg.q2 || 0 },
-  { key: 'q3', label: QUARTILE_LABELS.q3, value: agg.q3 || 0 },
-  { key: 'q4', label: QUARTILE_LABELS.q4, value: agg.q4 || 0 },
-  { key: 'unranked', label: QUARTILE_LABELS.unranked, value: agg.unranked || 0 },
-];
-// Thin inline stacked bar for the per-field breakdown (no legend; colours match
-// the main bar). Display only.
-const SjrFieldBar = ({ row }) => {
-  const total = (row.q1 || 0) + (row.q2 || 0) + (row.q3 || 0) + (row.q4 || 0) + (row.unranked || 0);
-  if (!total) return null;
-  return (
-    <div className="flex items-center gap-3 py-1">
-      <div style={{ width: 190, fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={row.field}>
-        {row.field.length > 30 ? row.field.slice(0, 29) + '…' : row.field}
-      </div>
-      <div className="flex flex-1 overflow-hidden" style={{ height: 16, borderRadius: 2, border: `1px solid ${PALETTE.rule}` }}>
-        {['q1', 'q2', 'q3', 'q4', 'unranked'].map((k) => {
-          const v = row[k] || 0;
-          if (!v) return null;
-          return <div key={k} title={`${QUARTILE_LABELS[k]}: ${fmtFull(v)} (${sjrPct(v, total).toFixed(1)}%)`}
-            style={{ width: `${(v / total) * 100}%`, background: QUARTILE_COLORS[k] }} />;
-        })}
-      </div>
-      <div style={{ width: 96, fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted, flex: 'none' }}>
-        {sjrPct(row.q1 || 0, total).toFixed(0)}% Q1 · {fmtFull(total)}
-      </div>
-    </div>
-  );
-};
-
-const SjrPanel = ({ years, country, filters, instFilterIds, open, onToggle }) => {
-  const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
-  const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
-  const filterActive = hasChips || hasInst;
-  const instTooMany = hasInst && instFilterIds.length > 90;
-
-  // Local UI state for the "Quartile mix by field" breakdown: how to sort the
-  // fields and how many to show. Persists for the panel's lifetime.
-  const [sjrFieldSort, setSjrFieldSort] = useState('works');
-  const [sjrFieldLimit, setSjrFieldLimit] = useState(10);
-
-  // Sort all 26 fields by the chosen criterion, then optionally cap the list.
-  const fieldsView = useMemo(() => {
-    const all = sjrByQuartile.by_field || [];
-    const sortFn = ({
-      works:   (r) => r.works,
-      q1:      (r) => (r.works ? r.q1 / r.works : 0),
-      topHalf: (r) => (r.works ? (r.q1 + r.q2) / r.works : 0),
-      ranked:  (r) => (r.works ? r.ranked / r.works : 0),
-    }[sjrFieldSort] || ((r) => r.works));
-    const sorted = [...all].sort((a, b) => sortFn(b) - sortFn(a));
-    const limit = Math.min(sjrFieldLimit, all.length);
-    return { all, sorted, shown: sorted.slice(0, limit) };
-  }, [sjrFieldSort, sjrFieldLimit]);
-
-  // National precomputed view, summed over the selected years (Thailand only).
-  const national = useMemo(() => {
-    if (!SJR_NAT_READY) return null;
-    const tby = sjrByQuartile.totals_by_year || {};
-    const useYears = (years || []).filter((y) => tby[y] || tby[String(y)]);
-    const agg = { works: 0, ranked: 0, q1: 0, q2: 0, q3: 0, q4: 0, unranked: 0 };
-    const src = useYears.length ? useYears.map((y) => tby[y] || tby[String(y)]) : [sjrByQuartile.overall];
-    for (const b of src) for (const k of Object.keys(agg)) agg[k] += (b[k] || 0);
-    return agg;
-  }, [JSON.stringify(years)]);
-
-  // Live view, computed in-browser for the exact current selection.
-  const [live, setLive] = useState({ status: 'idle' });
-  useEffect(() => {
-    if (!filterActive) { setLive({ status: 'idle' }); return; }
-    if (!SJR_BUNDLE_READY) { setLive({ status: 'nobundle' }); return; }
-    if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        setLive({ status: 'loading' });
-        let filter = buildFilterString(country, years, filters);
-        if (hasInst) filter += ',authorships.institutions.id:' + instFilterIds.join('|');
-        const cj = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&per-page=1`));
-        const count = (cj.meta && cj.meta.count) || 0;
-        if (cancelled) return;
-        if (count > SJR_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
-        const SEL = 'id,publication_year,primary_location';
-        const pages = Math.min(50, Math.max(1, Math.ceil(count / 200)));
-        const pageResults = await Promise.all(
-          Array.from({ length: pages }, (_, i) =>
-            fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&page=${i + 1}`))
-              .then((j) => j.results || [])
-              .catch(() => []))
-        );
-        if (cancelled) return;
-        const agg = { works: 0, ranked: 0, q1: 0, q2: 0, q3: 0, q4: 0, unranked: 0 };
-        for (const res of pageResults) {
-          for (const w of res) {
-            const q = sjrQuartileForWork(w, w.publication_year);
-            agg.works++;
-            if (q >= 1 && q <= 4) { agg.ranked++; agg['q' + q]++; } else agg.unranked++;
-          }
-        }
-        setLive({ status: 'ready', ...agg });
-      } catch (e) {
-        if (!cancelled) setLive({ status: 'error', error: (e && e.message) || 'Live computation failed' });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
-
-  const header = (hint) => (
-    <SectionTitle icon={Award} kicker="Journal placement" title="SCImago quartile of publishing venues" hint={hint} />
-  );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>{children}</Card>;
-
-  // Awaiting precompute and no filter.
-  if (!SJR_NAT_READY && !filterActive) {
-    return wrap(<>
-      {header('Awaiting precompute')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
-        <p style={{ marginBottom: 8 }}>This panel maps each work to its journal’s SCImago quartile (Q1 to Q4) and shows how much output sits in each tier. The national data has not been computed yet.</p>
-        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>Add the Scimago yearly CSVs to <strong>sjr/</strong>, run <strong>build_sjr_reference.py</strong>, then <strong>node sjr-pipeline/precompute_sjr.mjs</strong> with an OpenAlex API key. Filtering recomputes live.</p>
-      </div>
-    </>);
-  }
-
-  if (filterActive && live.status === 'nobundle') {
-    return wrap(<>{header('Reference not built')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-        Live quartile lookup needs the SJR reference. Add the Scimago CSVs to <strong>sjr/</strong> and run <strong>build_sjr_reference.py</strong>.
-      </div>
-    </>);
-  }
-  if (filterActive && live.status === 'loading') {
-    return wrap(<>{header('Live · matching current selection…')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
-  }
-  if (filterActive && live.status === 'toolarge') {
-    const msg = live.reason === 'inst'
-      ? `This institution-type selection spans too many institutions (${(instFilterIds || []).length}) to compute live. Pick a narrower subtype or also select a discipline.`
-      : `This selection covers ${(live.count || 0).toLocaleString()} works, above the ${SJR_MAX_LIVE.toLocaleString()} live cap. Narrow the filter to compute it live.`;
-    return wrap(<>{header('Selection too large for live computation')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>{msg}</div>
-    </>);
-  }
-  if (filterActive && live.status === 'error') {
-    return wrap(<>{header('Live computation unavailable')}
-      <div className="flex flex-col items-center justify-center px-4 py-10 text-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
-        <AlertCircle size={20} className="mb-2" />
-        <div style={{ fontSize: 13 }}>Could not compute this selection live.</div>
-        <div style={{ fontSize: 11, color: PALETTE.muted, marginTop: 4 }}>{live.error}</div>
-      </div>
-    </>);
-  }
-  // No filter on a non-Thailand country: national baseline is Thai only.
-  if (!filterActive && country !== 'TH') {
-    return wrap(<>{header('Apply a filter for live placement')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-        The precomputed national baseline covers {countryName('TH')}. Apply any filter (institution, discipline, or institution type) to compute the SCImago quartile mix live for {countryName(country)}.
-      </div>
-    </>);
-  }
-
-  const v = filterActive ? (live.status === 'ready' ? live : null) : national;
-  if (!v) return wrap(<>{header('Journal placement')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
-
-  const rankedTotal = v.ranked || 0;
-  const yearLabel = (() => {
-    const ys = (years || []).slice().sort((a, b) => a - b);
-    return ys.length <= 1 ? `${ys[0] || ''}` : `${ys[0]}–${ys[ys.length - 1]}`;
-  })();
-  const hint = filterActive ? `Live · current selection · ${yearLabel}` : `National · ${countryName('TH')} · precomputed · ${yearLabel}`;
-  const q1Share = sjrPct(v.q1 || 0, v.works);
-  const topHalfShare = sjrPct((v.q1 || 0) + (v.q2 || 0), v.works);
-  const rankedShare = sjrPct(rankedTotal, v.works);
-
-  return wrap(<>
-    {header(hint)}
-    <div className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
-      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">In Q1 journals</div>
-        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: QUARTILE_COLORS.q1, lineHeight: 1.1 }} className="mt-2">{q1Share.toFixed(1)}%</div>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(v.q1 || 0)} works</div>
-      </div>
-      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Top half (Q1+Q2)</div>
-        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.ink, lineHeight: 1.1 }} className="mt-2">{topHalfShare.toFixed(1)}%</div>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull((v.q1 || 0) + (v.q2 || 0))} works</div>
-      </div>
-      <div className="rounded-sm p-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Ranked in Scopus</div>
-        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 34, fontWeight: 500, color: PALETTE.teal, lineHeight: 1.1 }} className="mt-2">{rankedShare.toFixed(1)}%</div>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="mt-1">{fmtFull(rankedTotal)} of {fmtFull(v.works)} works</div>
-      </div>
-    </div>
-
-    <ProportionBar data={sjrBarData(v)} colorMap={QUARTILE_COLORS} />
-
-    {!filterActive && fieldsView.all.length > 0 && (
-      <div className="mt-6">
-        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">Quartile mix by field</div>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase ml-2">Sort by</span>
-          <div className="flex flex-wrap gap-1">
-            {[
-              { k: 'works',   l: 'Total works' },
-              { k: 'q1',      l: '% Q1' },
-              { k: 'topHalf', l: '% Top half' },
-              { k: 'ranked',  l: '% Ranked' },
-            ].map((o) => {
-              const active = sjrFieldSort === o.k;
-              return (
-                <button key={o.k} onClick={() => setSjrFieldSort(o.k)}
-                  className="rounded-sm px-2 py-0.5"
-                  style={{
-                    border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
-                    background: active ? PALETTE.ink : 'transparent',
-                    color: active ? PALETTE.cream : PALETTE.charcoal,
-                    fontFamily: FONT_MONO, fontSize: 10.5, letterSpacing: '0.03em',
-                  }}>
-                  {o.l}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-        <div>
-          {fieldsView.shown.map((row) => (<SjrFieldBar key={row.field} row={row} />))}
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.16em', color: PALETTE.muted }} className="uppercase">Show</span>
-          {[10, 14, 20, fieldsView.all.length].filter((n, i, arr) => arr.indexOf(n) === i).map((n) => {
-            const active = sjrFieldLimit === n;
-            const label = n >= fieldsView.all.length ? `all ${fieldsView.all.length}` : `top ${n}`;
-            return (
-              <button key={n} onClick={() => setSjrFieldLimit(n)}
-                className="rounded-sm px-2 py-0.5"
-                style={{
-                  border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
-                  background: active ? PALETTE.ink : 'transparent',
-                  color: active ? PALETTE.cream : PALETTE.charcoal,
-                  fontFamily: FONT_MONO, fontSize: 10.5,
-                }}>
-                {label}
-              </button>
-            );
-          })}
-          <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="ml-2">
-            Showing {fieldsView.shown.length} of {fieldsView.all.length} fields
-          </span>
-        </div>
-      </div>
-    )}
-
-    <div className="mt-5 rounded-sm px-4 py-3" style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.2em', color: PALETTE.muted }} className="uppercase mb-2">Method &amp; caveats</div>
-      <ul style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.6, listStyle: 'disc', paddingLeft: 18 }}>
-        <li style={{ marginBottom: 3 }}>Quartiles describe a journal’s citation standing in Scopus (SCImago SJR Best Quartile), not the quality of any individual article. See DORA and the Leiden Manifesto.</li>
-        <li style={{ marginBottom: 3 }}>“Unranked / not in Scopus” is not a defect: much Thai output appears in the Thai Citation Index and other venues SJR does not index.</li>
-        <li style={{ marginBottom: 3 }}>Each work is matched by journal ISSN to the SJR table for its publication year (nearest available year as fallback), counting all {countryName(country)}-affiliated works.</li>
-        <li style={{ marginBottom: 3 }}>{filterActive ? 'Live: matched in-browser for the current selection.' : `National: precomputed totals for ${countryName('TH')}.`} Source: SCImago Journal Rank, scimagojr.com.</li>
-      </ul>
-    </div>
-  </>);
-};
-
-// ===== Journal Placement Impact (citation impact by SJR quartile) ============
-// Same two-mode pattern as SjrPanel: precomputed national view when no filter
-// is active; live in-browser recompute when any filter is set (capped at
-// SJR_MAX_LIVE works). Three metric tabs share the same per-quartile triple
-// (works, cites, cited): avg cites/work (default), cited share, total cites.
-const sjrImpactBlank = () => ({
-  q1: { works: 0, cites: 0, cited: 0 },
-  q2: { works: 0, cites: 0, cited: 0 },
-  q3: { works: 0, cites: 0, cited: 0 },
-  q4: { works: 0, cites: 0, cited: 0 },
-  unranked: { works: 0, cites: 0, cited: 0 },
-});
-const sjrImpactQKey = (q) => ((q >= 1 && q <= 4) ? ('q' + q) : 'unranked');
-
-const SjrImpactPanel = ({ years, country, filters, instFilterIds, open, onToggle }) => {
-  const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
-  const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
-  const filterActive = hasChips || hasInst;
-  const instTooMany = hasInst && instFilterIds.length > 90;
-
-  const [impactTab, setImpactTab] = useState('avg');
-
-  // National precomputed view, summed over selected years (Thailand only).
-  const national = useMemo(() => {
-    if (!SJR_IMPACT_READY) return null;
-    const impact = sjrByQuartile.impact_by_quartile;
-    const tby = impact.by_year || {};
-    const useYears = (years || []).filter((y) => tby[y] || tby[String(y)]);
-    const out = sjrImpactBlank();
-    if (useYears.length) {
-      for (const y of useYears) {
-        const cur = tby[y] || tby[String(y)] || {};
-        for (const k of Object.keys(out)) {
-          const c = cur[k] || {};
-          out[k].works += c.works || 0;
-          out[k].cites += c.cites || 0;
-          out[k].cited += c.cited || 0;
-        }
-      }
-    } else {
-      const cur = impact.overall || {};
-      for (const k of Object.keys(out)) {
-        const c = cur[k] || {};
-        out[k].works = c.works || 0;
-        out[k].cites = c.cites || 0;
-        out[k].cited = c.cited || 0;
-      }
-    }
-    return out;
-  }, [JSON.stringify(years)]);
-
-  // Live view: paginate the filtered work list and aggregate per quartile.
-  const [live, setLive] = useState({ status: 'idle' });
-  useEffect(() => {
-    if (!filterActive) { setLive({ status: 'idle' }); return; }
-    if (!SJR_BUNDLE_READY) { setLive({ status: 'nobundle' }); return; }
-    if (instTooMany) { setLive({ status: 'toolarge', reason: 'inst' }); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        setLive({ status: 'loading' });
-        let filter = buildFilterString(country, years, filters);
-        if (hasInst) filter += ',authorships.institutions.id:' + instFilterIds.join('|');
-        const cj = await fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&per-page=1`));
-        const count = (cj.meta && cj.meta.count) || 0;
-        if (cancelled) return;
-        if (count > SJR_MAX_LIVE) { setLive({ status: 'toolarge', reason: 'count', count }); return; }
-        const SEL = 'id,publication_year,primary_location,cited_by_count';
-        const pages = Math.min(50, Math.max(1, Math.ceil(count / 200)));
-        const pageResults = await Promise.all(
-          Array.from({ length: pages }, (_, i) =>
-            fetchJson(withMailto(`${OPENALEX_BASE}/works?filter=${filter}&select=${SEL}&per-page=200&page=${i + 1}`))
-              .then((j) => j.results || [])
-              .catch(() => []))
-        );
-        if (cancelled) return;
-        const buckets = sjrImpactBlank();
-        for (const res of pageResults) {
-          for (const w of res) {
-            const q = sjrQuartileForWork(w, w.publication_year);
-            const k = sjrImpactQKey(q);
-            const c = w.cited_by_count || 0;
-            buckets[k].works++;
-            buckets[k].cites += c;
-            if (c > 0) buckets[k].cited++;
-          }
-        }
-        setLive({ status: 'ready', buckets });
-      } catch (e) {
-        if (!cancelled) setLive({ status: 'error', error: (e && e.message) || 'Live computation failed' });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
-
-  const header = (hint) => (
-    <SectionTitle icon={Sparkles} kicker="Journal placement impact" title="Citation impact by SJR quartile" hint={hint} />
-  );
-  const wrap = (children) => <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>{children}</Card>;
-
-  if (!SJR_IMPACT_READY && !filterActive) {
-    return wrap(<>
-      {header('Awaiting precompute')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, lineHeight: 1.6 }}>
-        <p style={{ marginBottom: 8 }}>This card shows the citation impact of works in each SJR quartile (Q1 to Q4 plus Unranked). The citation data has not been precomputed yet.</p>
-        <p style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink }}>Re-run <strong>node sjr-pipeline/precompute_sjr.mjs</strong> with an OpenAlex API key. The extended script also collects per-quartile citation counts. Filtering recomputes live.</p>
-      </div>
-    </>);
-  }
-  if (filterActive && live.status === 'nobundle') {
-    return wrap(<>{header('Reference not built')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-        Live quartile lookup needs the SJR reference. Add the Scimago CSVs to <strong>sjr/</strong> and run <strong>build_sjr_reference.py</strong>.
-      </div>
-    </>);
-  }
-  if (filterActive && live.status === 'loading') {
-    return wrap(<>{header('Live · matching current selection…')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
-  }
-  if (filterActive && live.status === 'toolarge') {
-    const msg = live.reason === 'inst'
-      ? `This institution-type selection spans too many institutions (${(instFilterIds || []).length}) to compute live. Pick a narrower subtype or also select a discipline.`
-      : `This selection covers ${(live.count || 0).toLocaleString()} works, above the ${SJR_MAX_LIVE.toLocaleString()} live cap. Narrow the filter to compute it live.`;
-    return wrap(<>{header('Selection too large for live computation')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>{msg}</div>
-    </>);
-  }
-  if (filterActive && live.status === 'error') {
-    return wrap(<>{header('Live computation unavailable')}
-      <div className="flex flex-col items-center justify-center px-4 py-10 text-center" style={{ color: PALETTE.burgundy, fontFamily: FONT_BODY }}>
-        <AlertCircle size={20} className="mb-2" />
-        <div style={{ fontSize: 13 }}>Could not compute this selection live.</div>
-        <div style={{ fontSize: 11, color: PALETTE.muted, marginTop: 4 }}>{live.error}</div>
-      </div>
-    </>);
-  }
-  if (!filterActive && country !== 'TH') {
-    return wrap(<>{header('Apply a filter for live impact')}
-      <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-        The precomputed national impact baseline covers {countryName('TH')}. Apply any filter to compute the per-quartile citation impact live for {countryName(country)}.
-      </div>
-    </>);
-  }
-
-  const buckets = filterActive ? (live.status === 'ready' ? live.buckets : null) : national;
-  if (!buckets) {
-    return wrap(<>{header('Journal placement impact')}<div className="px-2 py-6"><SkeletonBars rows={5} /></div></>);
-  }
-
-  const yearLabel = (() => {
-    const ys = (years || []).slice().sort((a, b) => a - b);
-    return ys.length <= 1 ? `${ys[0] || ''}` : `${ys[0]}–${ys[ys.length - 1]}`;
-  })();
-  const headerHint =
-    (filterActive ? 'Live · current selection · ' : `National · ${countryName('TH')} · precomputed · `) + yearLabel
-    + (impactTab === 'avg' ? ' · mean citations per work'
-        : impactTab === 'total' ? ' · total citations received'
-        : ' · share of works with at least one citation');
-
-  const totalWorks = Object.values(buckets).reduce((s, b) => s + (b.works || 0), 0);
-
-  return wrap(<>
-    {header(headerHint)}
-    <div className="mb-3 flex flex-wrap items-center gap-1">
-      {[
-        { key: 'avg',   label: 'Avg citations/work' },
-        { key: 'cited', label: 'Cited share' },
-        { key: 'total', label: 'Total citations' },
-      ].map((tab) => {
-        const active = impactTab === tab.key;
-        return (
-          <button key={tab.key} onClick={() => setImpactTab(tab.key)}
-            className="rounded-sm px-2.5 py-1 transition-colors"
-            style={{
-              border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
-              background: active ? PALETTE.ink : 'transparent',
-              color: active ? PALETTE.cream : PALETTE.charcoal,
-              fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
-            }}>
-            {tab.label}
-          </button>
-        );
-      })}
-    </div>
-    <ChartFrame
-      status="ready"
-      hint="Citation counts accumulate over time, so the most recent year reads low for total and average; cited share is the steadier lens."
-    >
-      {(() => {
-        const order = ['q1', 'q2', 'q3', 'q4', 'unranked'];
-        const rows = order.map((k) => {
-          const r = buckets[k] || { works: 0, cites: 0, cited: 0 };
-          const avg = r.works ? r.cites / r.works : 0;
-          const citedShare = r.works ? r.cited / r.works : 0;
-          let value, display;
-          if (impactTab === 'avg') {
-            value = avg;
-            display = `${avg.toFixed(2)} cites/work · ${fmtFull(r.works)} works`;
-          } else if (impactTab === 'total') {
-            value = r.cites;
-            display = `${fmtFull(r.cites)} cites · ${fmtFull(r.works)} works`;
-          } else {
-            value = citedShare * 100;
-            display = `${(citedShare * 100).toFixed(1)}% · ${fmtFull(r.cited)} of ${fmtFull(r.works)}`;
-          }
-          return { key: k, label: QUARTILE_LABELS[k], value, display, works: r.works, color: QUARTILE_COLORS[k] };
-        }).filter((r) => r.works > 0)
-          .sort((a, b) => b.value - a.value);
-
-        if (rows.length === 0) {
-          return (
-            <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-6">
-              No quartile-classified works in this selection.
-            </div>
-          );
-        }
-        const max = Math.max(1, ...rows.map((r) => r.value));
-        return (
-          <div className="space-y-2 py-2">
-            {rows.map((r) => (
-              <div key={r.key} className="flex items-center gap-3">
-                <div style={{ width: 220, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }} title={r.label}>
-                  {r.label}
-                </div>
-                <div className="flex-1" style={{ height: 22, position: 'relative', background: PALETTE.cream, borderRadius: 2 }}>
-                  <div style={{ width: `${(r.value / max) * 100}%`, background: r.color, height: '100%', borderRadius: 2, transition: 'width 0.4s ease' }} />
-                </div>
-                <div style={{ width: 260, fontFamily: FONT_MONO, fontSize: 11.5, color: PALETTE.ink, flex: 'none' }}>
-                  {r.display}
-                </div>
-              </div>
-            ))}
-            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }} className="px-2 pt-2">
-              {fmtFull(totalWorks)} works classified across Q1 to Q4 and Unranked.
-            </div>
-          </div>
-        );
-      })()}
-    </ChartFrame>
-  </>);
-};
-
 export default function ResearchOutputDashboard() {
   useFonts();
 
@@ -4258,6 +3777,11 @@ export default function ResearchOutputDashboard() {
   const [filters, setFilters] = useState({});
   const [state, setState] = useState({});
 
+  // Author role filter. 'any' (default) uses standard country_code affiliation;
+  // 'corresponding' restricts to works where at least one country-institution
+  // is credited as a corresponding-author's institution.
+  const [authorRole, setAuthorRole] = useState('any');
+
   // Persist country and clear filters when it changes (institution/publisher/funder
   // IDs from one country don't apply once the corpus shifts to another).
   useEffect(() => {
@@ -4265,6 +3789,10 @@ export default function ResearchOutputDashboard() {
       window.localStorage?.setItem('dashboard.country', country);
     }
     setFilters({});
+    // Author role is country-specific in the sense that the corresponding-institution
+    // roster is country-scoped. Reset to 'any' so the previous country's role
+    // filter doesn't linger with a mismatched roster.
+    setAuthorRole('any');
   }, [country]);
 
   // How many bars/slices each panel shows. Defaults aim for legible at first glance.
@@ -4282,128 +3810,27 @@ export default function ResearchOutputDashboard() {
   const [instTypeFilter, setInstTypeFilter] = useState('all');
   const [instSubcategoryFilter, setInstSubcategoryFilter] = useState('all');
 
-  // Publishing-channels view: 'top' (bar chart) or 'time' (rank-over-time bump
-  // chart, only meaningful in multi-year mode). The bump chart is lazy-loaded.
+  // Publishers panel view: 'top' (current bar chart) or 'time' (rank-over-time
+  // bump chart, only available in multi-year mode). The bump chart is lazy-
+  // loaded: when the user clicks the "Rank over time" tab the dashboard fires
+  // one group_by request per year for the 5-year window ending at the most
+  // recently selected year.
   const [publisherView, setPublisherView] = useState('top');
-  // Selected metric in the OA-impact-on-citations card.
-  // 'avg' = mean citations per work (default), 'total' = sum of citations,
-  // 'cited' = share of works with at least one citation.
-  const [oaImpactTab, setOaImpactTab] = useState('avg');
-
-  // Card-open registry. Cards become controlled via `bindCard(id)`. The main
-  // data effect gates each fetch on the corresponding id so closed cards do
-  // not trigger their OpenAlex requests on load. Defaults match the "only the
-  // first card of each section is open" policy. Toggling a card to open
-  // re-runs the main effect, which then fires the previously-skipped fetch.
-  const [cardOpen, setCardOpenState] = useState({
-    institutions: true,
-    fields: false, subfields: false, docTypes: false, languages: false,
-    collaborators: false, sdgs: false, funders: false,
-    publishers: true, oaStatus: false, apc: false,
-    sjr: true,
-    citationReach: true, citationInsight: false, oaImpact: false,
-    sjrImpact: false, topWorks: false,
-  });
-  const bindCard = useMemo(() => {
-    const cache = {};
-    return (id) => {
-      if (!cache[id]) {
-        cache[id] = (o) => setCardOpenState((m) => ({ ...m, [id]: o }));
-      }
-      return { open: cardOpen[id], onToggle: cache[id] };
-    };
-  }, [cardOpen]);
+  // Cache for the rank-over-time data. Keyed by a stable signature of the
+  // dimensions that affect the result (country + filters + max year). On
+  // signature change the cache resets.
   const [publisherRankCache, setPublisherRankCache] = useState({
     status: 'idle', rows: [], years: [], signature: null,
   });
-  // Lazy-load the rank-over-time data when the "Rank over time" tab is active.
-  // Window rule: a single selected year expands to the 5-year window ending at
-  // that year (e.g. 2023 -> 2019..2023), so the baseline is always the latest
-  // selected year counting backwards. A multi-year selection uses exactly the
-  // selected years (e.g. 2023 + 2024 -> just those two). One group_by request
-  // per year in the window. Cached by a signature of country + filters + window.
+
+  // If the user drops back to a single year, force the publisher panel back
+  // to the standard top-bar view since the time-series tab is no longer
+  // applicable. Otherwise they'd be stuck on a hidden tab.
   useEffect(() => {
-    if (publisherView !== 'time') return;
-    if (!years || years.length === 0) return;
-
-    const sortedSel = [...years].sort((a, b) => a - b);
-    const windowYears = sortedSel.length >= 2
-      ? sortedSel
-      : (() => {
-          const anchor = sortedSel[0];
-          const arr = [];
-          for (let y = anchor - 4; y <= anchor; y++) arr.push(y);
-          return arr;
-        })();
-
-    const signature = JSON.stringify({
-      country,
-      windowYears,
-      filters: Object.entries(filters || {})
-        .filter(([, v]) => v && v.length > 0)
-        .map(([k, v]) => [k, v.map((c) => c.value).sort()])
-        .sort(),
-    });
-    if (publisherRankCache.signature === signature) return;
-    if (publisherRankCache.status === 'loading') return;
-
-    let cancelled = false;
-    setPublisherRankCache({ status: 'loading', rows: [], years: [], signature });
-
-    const fetchYear = async (y) => {
-      const filterStr = buildFilterString(country, y, filters, 'publishers');
-      // per-page=200 returns the full top-200 publishers per year (OpenAlex group_by
-      // counts are exact regardless of page size; 200 just gives a complete ranking
-      // and matches the Top publishers panel). We still only chart the top 15.
-      const url = withMailto(
-        `${OPENALEX_BASE}/works?filter=${filterStr}` +
-        `&group_by=primary_location.source.host_organization&per-page=200`
-      );
-      try {
-        const j = await fetchJson(url);
-        const items = (j.group_by || []).map((g, idx) => ({
-          key: g.key,
-          label: g.key_display_name || 'Unknown',
-          count: g.count || 0,
-          rank: idx + 1,
-        }));
-        return [y, items];
-      } catch {
-        return [y, null];
-      }
-    };
-
-    Promise.all(windowYears.map(fetchYear)).then((perYearResults) => {
-      if (cancelled) return;
-      const totalByKey = new Map();
-      const labelByKey = new Map();
-      for (const [, items] of perYearResults) {
-        if (!items) continue;
-        for (const it of items) {
-          totalByKey.set(it.key, (totalByKey.get(it.key) || 0) + it.count);
-          if (!labelByKey.has(it.key)) labelByKey.set(it.key, it.label);
-        }
-      }
-      const topKeys = [...totalByKey.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([k]) => k);
-      const rows = topKeys.map((key) => {
-        const ranks = {};
-        const counts = {};
-        for (const [year, items] of perYearResults) {
-          if (!items) continue;
-          const item = items.find((it) => it.key === key);
-          if (item) { ranks[year] = item.rank; counts[year] = item.count; }
-        }
-        return { key, label: labelByKey.get(key) || 'Unknown', ranks, counts };
-      });
-      setPublisherRankCache({ status: 'ready', rows, years: windowYears, signature });
-    }).catch((e) => {
-      if (cancelled) return;
-      setPublisherRankCache({ status: 'error', rows: [], years: [], signature, error: e.message });
-    });
-
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [publisherView, country, years, JSON.stringify(filters)]);
+    if (years.length < 2 && publisherView !== 'top') {
+      setPublisherView('top');
+    }
+  }, [years, publisherView]);
 
   const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
@@ -4423,47 +3850,20 @@ export default function ResearchOutputDashboard() {
     return { count: n, truncated: n >= 200 };
   };
 
-  // Roster metadata lookup: OpenAlex institution id -> { type, subcategory,
-  // country, label }. Built from the /institutions roster, which is the only
-  // source of institution type and MHESI subcategory. Used to enrich the
-  // filtered group_by counts below and to drop foreign co-author institutions.
-  const institutionsRosterMeta = useMemo(() => {
-    const m = new Map();
-    for (const d of (state.institutions?.data || [])) m.set(d.key, d);
-    return m;
-  }, [state.institutions?.data]);
-
-  // The producing-institutions chart data. Counts come from the in-selection
-  // group_by (state.institutionsCounts) so the panel responds to publisher,
-  // discipline, and other filter chips. Each count is joined to the roster for
-  // its type/subcategory; entries with no roster match (foreign co-author
-  // institutions, or any beyond the roster) are dropped, which also restricts
-  // the list to the active country. Local type/subcategory pills filter further.
+  // Apply local type/subcategory filters to the institutions chart data.
+  // The full list (post-pagination) is in state.institutions.data; we narrow it
+  // in-memory rather than re-querying OpenAlex.
   const institutionsFiltered = useMemo(() => {
-    const counts = state.institutionsCounts?.data || [];
-    let base = counts
-      .map((d) => {
-        const meta = institutionsRosterMeta.get(d.key);
-        if (!meta) return null;
-        return {
-          key: d.key,
-          label: meta.label,
-          fullLabel: meta.fullLabel,
-          value: d.value,
-          country: meta.country,
-          type: meta.type,
-          subcategory: meta.subcategory,
-        };
-      })
-      .filter(Boolean);
+    const all = state.institutions?.data || [];
+    let filtered = all;
     if (instTypeFilter !== 'all') {
-      base = base.filter((d) => d.type === instTypeFilter);
+      filtered = filtered.filter((d) => d.type === instTypeFilter);
     }
     if (instSubcategoryFilter !== 'all') {
-      base = base.filter((d) => d.subcategory === instSubcategoryFilter);
+      filtered = filtered.filter((d) => d.subcategory === instSubcategoryFilter);
     }
-    return base;
-  }, [state.institutionsCounts?.data, institutionsRosterMeta, instTypeFilter, instSubcategoryFilter]);
+    return filtered;
+  }, [state.institutions?.data, instTypeFilter, instSubcategoryFilter]);
 
   // Available education-subcategory pills: only those actually present in the
   // current data set, in canonical (MHESI) display order.
@@ -4541,11 +3941,19 @@ export default function ResearchOutputDashboard() {
   }, [state.institutions?.data, instTypeFilter, instSubcategoryFilter]);
 
   const filterStrings = useMemo(() => {
+    // For the corresponding-author restriction: derive the top-100 country
+    // institutions from the roster panel. If the roster isn't loaded yet, the
+    // restriction is skipped (we don't want to fire filtered requests with a
+    // stale or empty roster; better to briefly show the unrestricted view).
+    const correspondingRoster = authorRole === 'corresponding'
+      ? (state.institutions?.data || []).slice(0, 100).map((d) => d.key)
+      : null;
+
     // Base filters, always built from the breadcrumb chips.
-    const baseAll = buildFilterString(country, years, filters);
+    const baseAll = buildFilterString(country, years, filters, null, authorRole, correspondingRoster);
     const baseByDim = {};
     Object.keys(DIMENSIONS).forEach((d) => {
-      baseByDim[d] = buildFilterString(country, years, filters, d);
+      baseByDim[d] = buildFilterString(country, years, filters, d, authorRole, correspondingRoster);
     });
 
     // Augment with the synthetic institution-ID filter when a type/subcategory is active.
@@ -4563,72 +3971,86 @@ export default function ResearchOutputDashboard() {
       m[d] = augmented(baseByDim[d], d !== 'institutions');
     });
     return m;
-  }, [country, years, filters, syntheticInstitutionFilter]);
+    // We depend on the roster's identity via a stable join; array reference
+    // alone would trigger unnecessary refetches on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [country, years, filters, syntheticInstitutionFilter, authorRole,
+      (state.institutions?.data || []).slice(0, 100).map((d) => d.key).join(',')]);
 
-  // Shared per-dimension fetch helper. Each per-card effect calls this to load
-  // its dimension's data; the returned cleanup cancels in-flight writes so a
-  // late response from a stale render cannot clobber fresh state. State is
-  // keyed by dimension name (matches what panels read out of `state`).
-  const runDimension = useCallback((key, url, transform) => {
+  useEffect(() => {
     let cancelled = false;
-    const set = (patch) => {
+    const setPanel = (key, patch) => {
       if (cancelled) return;
       setState((s) => ({ ...s, [key]: { ...(s[key] || {}), ...patch } }));
     };
-    set({ status: 'loading', error: null });
-    fetchJson(url)
-      .then((json) => {
+
+    const run = async (key, url, transform) => {
+      setPanel(key, { status: 'loading', error: null });
+      try {
+        const json = await fetchJson(url);
         if (cancelled) return;
-        const data = transform ? transform(json) : json;
-        set({ status: 'ready', data });
-      })
-      .catch((e) => {
+        const data = transform ? await transform(json) : json;
+        setPanel(key, { status: 'ready', data });
+      } catch (e) {
         if (cancelled) return;
-        set({ status: 'error', error: e.message || 'Fetch failed' });
-      });
-    return () => { cancelled = true; };
-  }, []);
+        setPanel(key, { status: 'error', error: e.message || 'Fetch failed' });
+      }
+    };
 
-  // KPI stats at the top of the page: always-on, fired on filter or year change.
-  useEffect(() => runDimension('total', countUrl(filterStrings.all), (j) => j?.meta?.count ?? 0),
-    [filterStrings.all, refreshKey, runDimension]);
-  useEffect(() => runDimension('oaCount', countUrl(filterStrings.all, 'is_oa:true'), (j) => j?.meta?.count ?? 0),
-    [filterStrings.all, refreshKey, runDimension]);
-  useEffect(() => runDimension('intlCount', countUrl(filterStrings.all, 'countries_distinct_count:>1'), (j) => j?.meta?.count ?? 0),
-    [filterStrings.all, refreshKey, runDimension]);
+    run('total', countUrl(filterStrings.all), (j) => j?.meta?.count ?? 0);
+    run('oaCount', countUrl(filterStrings.all, 'is_oa:true'), (j) => j?.meta?.count ?? 0);
+    run('intlCount', countUrl(filterStrings.all, 'countries_distinct_count:>1'), (j) => j?.meta?.count ?? 0);
+    // Domestic-only: works whose author affiliations are all from a single country
+    // (the active country). We fetch the count and reuse it in the collaborators panel
+    // so users see the share of domestic-only output below the cross-border bar chart.
+    run('domesticCount', countUrl(filterStrings.all, 'countries_distinct_count:1'), (j) => j?.meta?.count ?? 0);
 
-  // Outgoing citations: sum (refs * works) across the reference-count distribution.
-  useEffect(() => runDimension('outgoingCites', groupUrl(filterStrings.all, 'referenced_works_count'), (j) => {
-    const groups = j?.group_by || [];
-    let totalRefs = 0, totalWorks = 0, worksWithRefs = 0;
-    for (const g of groups) {
-      const refs = Number(g.key) || 0;
-      const c = g.count || 0;
-      totalRefs += refs * c; totalWorks += c;
-      if (refs > 0) worksWithRefs += c;
-    }
-    return { totalRefs, totalWorks, worksWithRefs };
-  }), [filterStrings.all, refreshKey, runDimension]);
+    // Outgoing citations: sum (refs * works) across the reference-count distribution.
+    // OpenAlex doesn't expose a direct sum aggregation, so we group_by referenced_works_count
+    // and compute the weighted total client-side. Note: works whose bibliographies haven't
+    // been parsed land in the key=0 bucket, so we also surface the "with refs" count.
+    run('outgoingCites', groupUrl(filterStrings.all, 'referenced_works_count'), (j) => {
+      const groups = j?.group_by || [];
+      let totalRefs = 0;
+      let totalWorks = 0;
+      let worksWithRefs = 0;
+      for (const g of groups) {
+        const refs = Number(g.key) || 0;
+        const c = g.count || 0;
+        totalRefs += refs * c;
+        totalWorks += c;
+        if (refs > 0) worksWithRefs += c;
+      }
+      return { totalRefs, totalWorks, worksWithRefs };
+    });
 
-  // Incoming citations: sum (cites * works) across the cited_by_count distribution.
-  useEffect(() => runDimension('incomingCites', groupUrl(filterStrings.all, 'cited_by_count'), (j) => {
-    const groups = j?.group_by || [];
-    let totalCites = 0, totalWorks = 0, citedWorks = 0;
-    for (const g of groups) {
-      const c = Number(g.key) || 0;
-      const w = g.count || 0;
-      totalCites += c * w; totalWorks += w;
-      if (c > 0) citedWorks += w;
-    }
-    return { totalCites, totalWorks, citedWorks };
-  }), [filterStrings.all, refreshKey, runDimension]);
+    // Incoming citations: same trick as outgoing, but on cited_by_count instead of
+    // referenced_works_count. The distribution gives us {key: <citation count>, count:
+    // <number of works with that many cites>}; we sum (key * count) to get total cites
+    // received by the active selection. Average = total / totalWorks.
+    run('incomingCites', groupUrl(filterStrings.all, 'cited_by_count'), (j) => {
+      const groups = j?.group_by || [];
+      let totalCites = 0;
+      let totalWorks = 0;
+      let citedWorks = 0;
+      for (const g of groups) {
+        const c = Number(g.key) || 0;
+        const w = g.count || 0;
+        totalCites += c * w;
+        totalWorks += w;
+        if (c > 0) citedWorks += w;
+      }
+      return { totalCites, totalWorks, citedWorks };
+    });
 
-  // Citation reach: cited/uncited counts + prior-year comparison (single-year only).
-  useEffect(() => {
-    if (!cardOpen.citationReach) return;
-    const cleanups = [];
-    cleanups.push(runDimension('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0));
-    cleanups.push(runDimension('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0));
+    // Cited vs uncited share for the active selection. Cheap: two count requests.
+    run('citedShare', countUrl(filterStrings.all, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
+    run('uncitedShare', countUrl(filterStrings.all, 'cited_by_count:0'), (j) => j?.meta?.count ?? 0);
+
+    // Prior-year comparisons for the visibility overview card. Only fired in
+    // single-year mode, where there's a well-defined "the active year" to swap
+    // out of the filter string. In multi-year mode the comparison view is
+    // hidden and these fetches are skipped.
     if (years.length === 1) {
       for (let offset = 1; offset <= 5; offset++) {
         const targetYear = year - offset;
@@ -4637,161 +4059,110 @@ export default function ResearchOutputDashboard() {
           new RegExp(`publication_year:${year}\\b`),
           `publication_year:${targetYear}`
         );
-        cleanups.push(runDimension(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0));
-        cleanups.push(runDimension(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0));
+        run(`prevYearCited_${offset}`,   countUrl(prevYearAll, 'cited_by_count:>0'), (j) => j?.meta?.count ?? 0);
+        run(`prevYearUncited_${offset}`, countUrl(prevYearAll, 'cited_by_count:0'),  (j) => j?.meta?.count ?? 0);
       }
     }
-    return () => { for (const fn of cleanups) try { fn(); } catch { /* noop */ } };
-  }, [filterStrings.all, year, years.length, cardOpen.citationReach, refreshKey, runDimension]);
 
-  // OA impact: six group_by(cited_by_count) requests, one per OA pathway.
-  useEffect(() => {
-    if (!cardOpen.oaImpact) return;
-    let cancelled = false;
-    const set = (patch) => { if (!cancelled) setState((s) => ({ ...s, oaImpact: { ...(s.oaImpact || {}), ...patch } })); };
-    set({ status: 'loading', error: null });
-    (async () => {
-      try {
-        const statuses = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
-        const pairs = await Promise.all(statuses.map(async (s) => {
-          const url = groupUrl(`${filterStrings.all},open_access.oa_status:${s}`, 'cited_by_count');
-          const j = await fetchJson(url);
-          let cites = 0, works = 0, cited = 0;
-          for (const g of j?.group_by || []) {
-            const k = Number(g.key) || 0;
-            const w = g.count || 0;
-            cites += k * w; works += w;
-            if (k > 0) cited += w;
-          }
-          return [s, { cites, works, cited }];
-        }));
-        if (cancelled) return;
-        set({ status: 'ready', data: Object.fromEntries(pairs) });
-      } catch (e) {
-        if (cancelled) return;
-        set({ status: 'error', error: e.message || 'Fetch failed' });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [filterStrings.all, cardOpen.oaImpact, refreshKey]);
-
-  // Top works (Prominent works card).
-  useEffect(() => {
-    if (!cardOpen.topWorks) return;
-    return runDimension('topWorks', topWorksUrl(filterStrings.all), (j) =>
+    run('topWorks', topWorksUrl(filterStrings.all), (j) =>
       (j.results || []).map((w) => ({
-        id: w.id, doi: w.doi, title: w.title || 'Untitled', cites: w.cited_by_count || 0,
+        id: w.id,
+        doi: w.doi,
+        title: w.title || 'Untitled',
+        cites: w.cited_by_count || 0,
         type: TYPE_NAMES[w.type] || w.type || '—',
         venue: w.primary_location?.source?.display_name || '—',
         oa: w.open_access?.is_oa,
         firstAuthor:
           (w.authorships || []).find((a) => a.author_position === 'first')?.author?.display_name ||
-          (w.authorships || [])[0]?.author?.display_name || '—',
+          (w.authorships || [])[0]?.author?.display_name ||
+          '—',
       }))
     );
-  }, [filterStrings.all, cardOpen.topWorks, refreshKey, runDimension]);
 
-  // Output forms (docTypes), Access regime (oaStatus), Language of record (languages),
-  // Disciplinary mix (fields), Granular topics (subfields), Publishing channels (publishers),
-  // Producing institutions (institutionsCounts), Mission alignment (sdgs), Funding landscape (funders):
-  // each one fires only when its card is open and only refires on changes to its own
-  // filter string (and the refresh key).
-  useEffect(() => {
-    if (!cardOpen.docTypes) return;
-    return runDimension('docTypes', groupUrl(filterStrings.docTypes, 'type'), (j) =>
-      (j.group_by || []).map((g) => ({ key: g.key, label: TYPE_NAMES[g.key] || g.key_display_name || g.key, value: g.count })).filter((d) => d.value > 0)
+    run('docTypes', groupUrl(filterStrings.docTypes, 'type'), (j) =>
+      (j.group_by || []).map((g) => ({
+        key: g.key,
+        label: TYPE_NAMES[g.key] || g.key_display_name || g.key,
+        value: g.count,
+      })).filter((d) => d.value > 0)
     );
-  }, [filterStrings.docTypes, cardOpen.docTypes, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.oaStatus) return;
-    return runDimension('oaStatus', groupUrl(filterStrings.oaStatus, 'open_access.oa_status'), (j) =>
-      (j.group_by || []).map((g) => ({ key: g.key, label: g.key.charAt(0).toUpperCase() + g.key.slice(1), value: g.count })).filter((d) => d.value > 0)
+    run('oaStatus', groupUrl(filterStrings.oaStatus, 'open_access.oa_status'), (j) =>
+      (j.group_by || []).map((g) => ({
+        key: g.key,
+        label: g.key.charAt(0).toUpperCase() + g.key.slice(1),
+        value: g.count,
+      })).filter((d) => d.value > 0)
     );
-  }, [filterStrings.oaStatus, cardOpen.oaStatus, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.languages) return;
-    return runDimension('languages', groupUrl(filterStrings.languages, 'language'), (j) =>
-      (j.group_by || []).map((g) => ({ key: g.key, label: LANG_NAMES[g.key] || g.key_display_name || g.key, value: g.count })).filter((d) => d.value > 0)
+    run('languages', groupUrl(filterStrings.languages, 'language'), (j) =>
+      (j.group_by || [])
+        .map((g) => ({
+          key: g.key,
+          label: LANG_NAMES[g.key] || g.key_display_name || g.key,
+          value: g.count,
+        }))
+        .filter((d) => d.value > 0)
     );
-  }, [filterStrings.languages, cardOpen.languages, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.fields) return;
-    return runDimension('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
-      (j.group_by || []).map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 32), value: g.count })).filter((d) => d.value > 0)
+    run('fields', groupUrl(filterStrings.fields, 'primary_topic.field.id'), (j) =>
+      (j.group_by || [])
+        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 32), value: g.count }))
+        .filter((d) => d.value > 0)
     );
-  }, [filterStrings.fields, cardOpen.fields, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.subfields) return;
-    return runDimension('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
-      (j.group_by || []).map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count })).filter((d) => d.value > 0)
+    run('subfields', groupUrl(filterStrings.subfields, 'primary_topic.subfield.id'), (j) =>
+      (j.group_by || [])
+        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
+        .filter((d) => d.value > 0)
     );
-  }, [filterStrings.subfields, cardOpen.subfields, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.publishers) return;
-    return runDimension('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
-      (j.group_by || []).filter((g) => g.key && g.key !== 'unknown')
+    run('publishers', groupUrl(filterStrings.publishers, 'primary_location.source.host_organization'), (j) =>
+      (j.group_by || [])
+        .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 36), value: g.count }))
     );
-  }, [filterStrings.publishers, cardOpen.publishers, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.institutions) return;
-    return runDimension('institutionsCounts', groupUrl(filterStrings.institutions, 'authorships.institutions.id'), (j) =>
-      (j.group_by || []).filter((g) => g.key && g.key !== 'unknown')
-        .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 40), value: g.count })).filter((d) => d.value > 0)
-    );
-  }, [filterStrings.institutions, cardOpen.institutions, refreshKey, runDimension]);
-
-  // Co-authorship reach: collaborator countries + domestic-only count.
-  useEffect(() => {
-    if (!cardOpen.collaborators) return;
-    const a = runDimension('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
+    run('collaborators', groupUrl(filterStrings.collaborators, 'authorships.countries'), (j) => {
       const all = j.group_by || [];
       return all
         .map((g) => {
+          // OpenAlex returns either the bare ISO-2 code or a full URL
+          // like https://openalex.org/countries/TH. Normalise to the code.
           const raw = g.key || '';
           const m = raw.match(/\/countries\/([A-Z]{2})$/i);
           const code = (m ? m[1] : raw).toUpperCase();
           return { key: code, label: countryName(code), value: g.count, _rawKey: g.key };
         })
-        .filter((g) => g.key && g.key !== country && g.key !== 'UNKNOWN' && g.key.length === 2);
+        .filter((g) => g.key && g.key !== country && g.key && g.key !== 'UNKNOWN' && g.key.length === 2);
     });
-    const b = runDimension('domesticCount', countUrl(filterStrings.all, 'countries_distinct_count:1'), (j) => j?.meta?.count ?? 0);
-    return () => { try { a(); } catch { /* noop */ } try { b(); } catch { /* noop */ } };
-  }, [filterStrings.collaborators, filterStrings.all, country, cardOpen.collaborators, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.sdgs) return;
-    return runDimension('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
-      (j.group_by || []).map((g) => {
-        const num = (g.key || '').match(/\/(\d+)$/)?.[1];
-        const label = num ? `SDG ${num} · ${g.key_display_name}` : g.key_display_name;
-        return { key: g.key, label: cleanLabel(label, 42), value: g.count };
-      }).filter((d) => d.value > 0)
+    run('sdgs', groupUrl(filterStrings.sdgs, 'sustainable_development_goals.id'), (j) =>
+      (j.group_by || [])
+        .map((g) => {
+          const num = (g.key || '').match(/\/(\d+)$/)?.[1];
+          const label = num ? `SDG ${num} · ${g.key_display_name}` : g.key_display_name;
+          return { key: g.key, label: cleanLabel(label, 42), value: g.count };
+        })
+        .filter((d) => d.value > 0)
     );
-  }, [filterStrings.sdgs, cardOpen.sdgs, refreshKey, runDimension]);
 
-  useEffect(() => {
-    if (!cardOpen.funders) return;
-    return runDimension('funders', groupUrl(filterStrings.funders, 'funders.id'), (j) =>
-      (j.group_by || []).filter((g) => g.key && g.key !== 'unknown')
+    run('funders', groupUrl(filterStrings.funders, 'funders.id'), (j) =>
+      (j.group_by || [])
+        .filter((g) => g.key && g.key !== 'unknown')
         .map((g) => ({ key: g.key, label: cleanLabel(g.key_display_name, 38), value: g.count }))
     );
-  }, [filterStrings.funders, cardOpen.funders, refreshKey, runDimension]);
 
-  // Institution roster (metadata only): fetched from the /institutions endpoint,
-  // keyed solely on country and years. It supplies type/subcategory metadata and
-  // the id set for the synthetic type filter; the chart counts come separately
-  // from the in-selection group_by in the main effect. Keeping the roster in its
-  // own effect, independent of the filter chips, breaks an infinite-render loop
-  // that would otherwise occur: filter chips → filterStrings change → main effect
-  // refires → roster reference changes → syntheticInstitutionFilter recomputes →
-  // filterStrings change → loop. Decoupling stops the cascade.
+    return () => { cancelled = true; };
+  }, [year, refreshKey, filterStrings]);
+
+  // Producing institutions: fetched independently because it uses the /institutions
+  // endpoint (not works group_by), so it doesn't need to refire when filter chips
+  // change. Keeping this in its own useEffect breaks an infinite-render loop that
+  // would otherwise occur: filter chips → filterStrings change → main effect refires
+  // → institutions data array reference changes → syntheticInstitutionFilter
+  // recomputes → filterStrings change → loop. Decoupling stops the cascade.
   useEffect(() => {
     let cancelled = false;
     const setPanel = (key, patch) => {
@@ -4817,35 +4188,35 @@ export default function ResearchOutputDashboard() {
           if (batch.length < 200) break;
         }
         if (cancelled) return;
-        // This roster now serves as metadata only: it supplies each institution's
-        // type and MHESI subcategory (for the pills and the y-axis colours) and the
-        // id set used by the synthetic type filter. The chart counts come from the
-        // in-selection group_by (state.institutionsCounts), which is naturally
-        // bounded by the corpus, so the old counts_by_year inflation that affected
-        // mis-disambiguated institutions (e.g. National Institute for Fusion Science
-        // for JP) no longer reaches the display and needs no ceiling workaround.
         const data = allInsts
           .map((inst) => {
+            // Sum works_count across all selected years from the counts_by_year array.
+            const yearSet = new Set(years);
+            const value = (inst.counts_by_year || [])
+              .filter((c) => yearSet.has(c.year))
+              .reduce((s, c) => s + (c.works_count || 0), 0);
             const type = inst.type || 'other';
             return {
               key: inst.id,
               label: inst.display_name || 'Unknown',
               fullLabel: inst.display_name,
+              value,
               country: inst.country_code,
               type,
               subcategory: type === 'education' ? subcategoryFor(inst.display_name) : null,
             };
           })
           .filter((d) => {
-            // Keep only institutions actually located in the active country.
-            if (d.country !== country) return false;
+            // Standard checks: positive paper count and matching country code.
+            if (d.value <= 0 || d.country !== country) return false;
             // Exclude known-misclassified institutions for this country
             // (data quality issue at OpenAlex; see comment near
             // EXCLUDED_INSTITUTIONS_BY_COUNTRY at top of file).
             const excluded = EXCLUDED_INSTITUTIONS_BY_COUNTRY[country];
             if (excluded && excluded.has(d.key)) return false;
             return true;
-          });
+          })
+          .sort((a, b) => b.value - a.value);
         setPanel('institutions', { status: 'ready', data });
       } catch (e) {
         if (cancelled) return;
@@ -4855,6 +4226,116 @@ export default function ResearchOutputDashboard() {
 
     return () => { cancelled = true; };
   }, [country, years, refreshKey]);
+
+  // Lazy fetcher for the Publishers rank-over-time bump chart. Fires only when
+  // the user has selected the time-series tab and the cache for the current
+  // (country, filters, anchor-year) signature is stale or empty.
+  //
+  // We fetch top publishers for each of the last 5 years up to the maximum
+  // year currently selected. Each call is one `group_by=primary_location...`
+  // request scoped to country + filter chips + that specific year. The chart
+  // shows the top 15 most-frequent publishers across the full 5-year window
+  // (union of each year's top 30, then ranked by 5-year total) and traces
+  // each publisher's rank position year by year.
+  useEffect(() => {
+    if (publisherView !== 'time') return;
+    if (years.length < 2) return;
+    const anchorYear = Math.max(...years);
+    // Cache signature: stable string capturing every input that affects the
+    // result. If unchanged, no refetch.
+    const signature = JSON.stringify({
+      country,
+      anchorYear,
+      authorRole,
+      filters: Object.entries(filters || {})
+        .filter(([, v]) => v && v.length > 0)
+        .map(([k, v]) => [k, v.map((c) => c.value).sort()])
+        .sort(),
+    });
+    if (publisherRankCache.signature === signature) return;
+    if (publisherRankCache.status === 'loading') return;
+
+    let cancelled = false;
+    setPublisherRankCache({ status: 'loading', rows: [], years: [], signature });
+
+    // Build the 5-year window ending at anchorYear.
+    const TIME_WINDOW = 5;
+    const windowYears = [];
+    for (let y = anchorYear - TIME_WINDOW + 1; y <= anchorYear; y++) {
+      windowYears.push(y);
+    }
+
+    // Fetch top publishers for one year, using the same filter base as the
+    // rest of the dashboard except with publication_year overridden to this
+    // single year. We use the existing buildFilterString helper for consistency
+    // with the publisher chip-filter logic.
+    const correspondingRoster = authorRole === 'corresponding'
+      ? (state.institutions?.data || []).slice(0, 100).map((d) => d.key)
+      : null;
+    const fetchYear = async (y) => {
+      const filterStr = buildFilterString(country, y, filters, 'publishers', authorRole, correspondingRoster);
+      const url = withMailto(
+        `${OPENALEX_BASE}/works?filter=${filterStr}` +
+        `&group_by=primary_location.source.host_organization&per-page=30`
+      );
+      try {
+        const j = await fetchJson(url);
+        // Map of publisher_id → { label, count } for this year, in count order.
+        const items = (j.group_by || []).map((g, idx) => ({
+          key: g.key,
+          label: g.key_display_name || 'Unknown',
+          count: g.count || 0,
+          rank: idx + 1,
+        }));
+        return [y, items];
+      } catch {
+        return [y, null];
+      }
+    };
+
+    Promise.all(windowYears.map(fetchYear)).then((perYearResults) => {
+      if (cancelled) return;
+      // Aggregate: union the top-30 from each year, then pick the top-15 by
+      // 5-year total (publishers that appear consistently rank above those
+      // that appeared once with a big spike).
+      const totalByKey = new Map();
+      const labelByKey = new Map();
+      for (const [, items] of perYearResults) {
+        if (!items) continue;
+        for (const it of items) {
+          totalByKey.set(it.key, (totalByKey.get(it.key) || 0) + it.count);
+          if (!labelByKey.has(it.key)) labelByKey.set(it.key, it.label);
+        }
+      }
+      const topKeys = [...totalByKey.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 15)
+        .map(([k]) => k);
+
+      // For each chosen publisher, collect its year-by-year rank and count.
+      const rows = topKeys.map((key) => {
+        const ranks = {};
+        const counts = {};
+        for (const [year, items] of perYearResults) {
+          if (!items) continue;
+          const item = items.find((it) => it.key === key);
+          if (item) {
+            ranks[year] = item.rank;
+            counts[year] = item.count;
+          }
+        }
+        return { key, label: labelByKey.get(key) || 'Unknown', ranks, counts };
+      });
+
+      setPublisherRankCache({ status: 'ready', rows, years: windowYears, signature });
+    }).catch((e) => {
+      if (cancelled) return;
+      setPublisherRankCache({ status: 'error', rows: [], years: [], signature, error: e.message });
+    });
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publisherView, country, years, JSON.stringify(filters), authorRole]);
 
   const selKeys = (dim) => (filters[dim] || []).map((f) => f.value);
 
@@ -4973,6 +4454,49 @@ export default function ResearchOutputDashboard() {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <CountrySelector country={country} onChange={setCountry} />
+              {/* Author role filter. 'Any affiliation' (default) counts every
+                  work with at least one country-affiliated author on the byline.
+                  'Corresponding' narrows to works where a country-affiliated
+                  institution is credited as a corresponding-author institution.
+                  This is a stronger signal of paper leadership.
+                  First-author-only is not offered because OpenAlex does not
+                  expose author_position as a top-level filter. */}
+              <div
+                className="flex items-center gap-1 rounded-sm"
+                style={{ border: `1px solid ${PALETTE.rule}` }}
+              >
+                <span
+                  className="pl-2 pr-1"
+                  style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.14em', color: PALETTE.muted }}
+                >
+                  ROLE
+                </span>
+                {[
+                  { key: 'any',           label: 'Any' },
+                  { key: 'corresponding', label: 'Corresponding' },
+                ].map((r) => {
+                  const active = authorRole === r.key;
+                  return (
+                    <button
+                      key={r.key}
+                      onClick={() => setAuthorRole(r.key)}
+                      style={{
+                        fontFamily: FONT_MONO,
+                        fontSize: 11,
+                        letterSpacing: '0.04em',
+                        background: active ? PALETTE.ink : 'transparent',
+                        color: active ? PALETTE.cream : PALETTE.charcoal,
+                        padding: '4px 8px',
+                      }}
+                      title={r.key === 'any'
+                        ? `Count every work with at least one ${countryName(country)}-affiliated author on the byline.`
+                        : `Restrict to works where a ${countryName(country)}-affiliated institution is credited as a corresponding-author institution.`}
+                    >
+                      {r.label}
+                    </button>
+                  );
+                })}
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 {/* Multi-select year tabs. Click to toggle each year; cannot
                     deselect the last remaining year (the dashboard always needs
@@ -5182,48 +4706,18 @@ export default function ResearchOutputDashboard() {
       </section>
 
       <main className="mx-auto max-w-[1400px] px-6 py-8">
-        <div
-          className="mb-5 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-sm px-4 py-2.5"
-          style={{ background: PALETTE.paper, border: `1px solid ${PALETTE.rule}` }}
-        >
-          <span style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.18em', color: PALETTE.muted }} className="uppercase">
-            Legend
-          </span>
-          <span className="flex items-center gap-2">
-            <span
-              className="flex h-6 w-6 flex-none items-center justify-center rounded-sm"
-              style={{ background: PALETTE.ink, color: PALETTE.cream }}
-            >
-              <Filter size={12} strokeWidth={1.8} />
-            </span>
-            <span style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.charcoal }}>
-              Solid icon: click a bar or slice to filter the whole dashboard
-            </span>
-          </span>
-          <span className="flex items-center gap-2">
-            <span
-              className="flex h-6 w-6 flex-none items-center justify-center rounded-sm"
-              style={{ background: 'transparent', color: PALETTE.muted, border: `1px solid ${PALETTE.rule}` }}
-            >
-              <Filter size={12} strokeWidth={1.8} />
-            </span>
-            <span style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.charcoal }}>
-              Outline icon: display only
-            </span>
-          </span>
-        </div>
-        <CollapsibleSection title="Publication Landscape" subtitle="Who and what">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('institutions')}>
+          <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={Building2}
-              filterable
               kicker="Producing institutions"
               title="Where the research happens"
-              hint={`${countryName(country)} institutions · counts within the current selection`}
+              hint={`Full ${countryName(country)} roster · counts via institutions endpoint`}
               count={
-                state.institutionsCounts?.status === 'ready'
-                  ? `${institutionsFiltered.length} of ${(state.institutions?.data || []).length}`
+                state.institutions?.status === 'ready'
+                  ? (institutionsFiltered.length === (state.institutions?.data || []).length
+                      ? institutionsFiltered.length
+                      : `${institutionsFiltered.length} of ${(state.institutions?.data || []).length}`)
                   : null
               }
               countLabel="institutions"
@@ -5287,12 +4781,12 @@ export default function ResearchOutputDashboard() {
               </div>
             )}
             <ChartFrame
-              status={state.institutionsCounts?.status}
-              error={state.institutionsCounts?.error}
+              status={state.institutions?.status}
+              error={state.institutions?.error}
               hint={
-                institutionsFiltered.length === 0
-                  ? 'No institutions match the active filters.'
-                  : `Showing ${institutionsFiltered.length} of ${(state.institutions?.data || []).length} ${countryName(country)} institutions producing output in the current selection.`
+                institutionsFiltered.length === 0 && (state.institutions?.data || []).length > 0
+                  ? 'No institutions match the active type/subcategory filter.'
+                  : `Showing ${institutionsFiltered.length} of ${(state.institutions?.data || []).length} ${countryName(country)} institutions.`
               }
             >
               <HBar
@@ -5331,10 +4825,9 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('fields')}>
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Layers}
-              filterable
               kicker="Disciplinary mix"
               title="Fields of inquiry"
               hint="OpenAlex primary_topic.field"
@@ -5357,10 +4850,9 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('subfields')}>
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Sparkles}
-              filterable
               kicker="Granular topics"
               title="Active subfields"
               hint="OpenAlex primary_topic.subfield"
@@ -5383,7 +4875,7 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('docTypes')}>
+          <Card className="p-5 lg:col-span-4">
             <SectionTitle
               icon={FileText}
               kicker="Output forms"
@@ -5408,7 +4900,34 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('languages')}>
+          <Card className="p-5 lg:col-span-4">
+            <SectionTitle
+              icon={BookOpen}
+              kicker="Access regime"
+              title="Open access pathways"
+              hint="Gold · Green · Hybrid · Bronze · Closed"
+              count={panelN('oaStatus')?.count}
+              countLabel="OA pathways"
+            />
+            <ChartFrame status={state.oaStatus?.status} error={state.oaStatus?.error}>
+              <Donut
+                data={sliceFor('oaStatus')}
+                height={260}
+                colorMap={OA_COLORS}
+                onSliceClick={onPick('oaStatus')}
+                selectedKeys={selKeys('oaStatus')}
+              />
+              <ChartControls
+                total={(state.oaStatus?.data || []).length}
+                limit={limitFor('oaStatus')}
+                onLimitChange={setLimit('oaStatus')}
+                onOpenTable={() => setTableOpenDim('oaStatus')}
+                options={[5, 6]}
+              />
+            </ChartFrame>
+          </Card>
+
+          <Card className="p-5 lg:col-span-4">
             <SectionTitle
               icon={Languages}
               kicker="Language of record"
@@ -5433,10 +4952,90 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('collaborators')}>
+          <Card className="p-5 lg:col-span-6">
+            <SectionTitle
+              icon={Newspaper}
+              kicker="Publishing channels"
+              title={publisherView === 'time'
+                ? `Publisher rank over time · ${countryName(country)}`
+                : `Top publishers carrying ${countryName(country)} output`}
+              hint={publisherView === 'time'
+                ? `5-year window ending ${Math.max(...years)} · top 15`
+                : 'Host organisation of the primary location'}
+              count={publisherView === 'top' ? panelN('publishers')?.count : null}
+              countLabel={publisherView === 'top'
+                ? (panelN('publishers')?.truncated ? 'publishers shown · capped at 200' : 'distinct publishers')
+                : null}
+            />
+            {/* View tabs: visible only when multi-year is engaged, since the
+                rank-over-time chart needs at least two years to be meaningful. */}
+            {years.length >= 2 && (
+              <div className="mb-3 flex flex-wrap items-center gap-1">
+                {[
+                  { key: 'top',  label: 'Top publishers' },
+                  { key: 'time', label: 'Rank over time' },
+                ].map((tab) => {
+                  const isActive = publisherView === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      onClick={() => setPublisherView(tab.key)}
+                      className="rounded-sm px-2.5 py-1 transition-colors"
+                      style={{
+                        border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
+                        background: isActive ? PALETTE.ink : 'transparent',
+                        color: isActive ? PALETTE.cream : PALETTE.charcoal,
+                        fontFamily: FONT_MONO,
+                        fontSize: 11,
+                        letterSpacing: '0.03em',
+                      }}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {publisherView === 'top' ? (
+              <ChartFrame status={state.publishers?.status} error={state.publishers?.error}>
+                <HBar
+                  data={sliceFor('publishers')}
+                  color={PALETTE.teal}
+                  onBarClick={onPick('publishers')}
+                  selectedKeys={selKeys('publishers')}
+                />
+                <ChartControls
+                  total={(state.publishers?.data || []).length}
+                  limit={limitFor('publishers')}
+                  onLimitChange={setLimit('publishers')}
+                  onOpenTable={() => setTableOpenDim('publishers')}
+                />
+              </ChartFrame>
+            ) : (
+              <>
+                <p
+                  className="-mt-1 mb-3 max-w-3xl"
+                  style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.5 }}
+                >
+                  Each line traces one publisher's rank position across the 5-year window.
+                  Crossings indicate one publisher overtaking another; dramatic swings indicate volatility.
+                  Top-ranked publishers in the most recent year carry warmer colours.
+                  Hover a line for year-by-year ranks and counts.
+                </p>
+                <RankBumpChart
+                  rows={publisherRankCache.rows}
+                  years={publisherRankCache.years}
+                  topN={15}
+                  status={publisherRankCache.status === 'idle' ? 'loading' : publisherRankCache.status}
+                  accentColor={PALETTE.teal}
+                />
+              </>
+            )}
+          </Card>
+
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Globe2}
-              filterable
               kicker="Co-authorship reach"
               title="International collaborators"
               hint={`${countryName(country)} excluded from list`}
@@ -5460,6 +5059,7 @@ export default function ResearchOutputDashboard() {
                 onLimitChange={setLimit('collaborators')}
                 onOpenTable={() => setTableOpenDim('collaborators')}
               />
+              {/* Domestic-collaboration summary */}
               {state.domesticCount?.status === 'ready' && totalCount ? (
                 <div
                   className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-sm px-3 py-2"
@@ -5483,10 +5083,9 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('sdgs')}>
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Target}
-              filterable
               kicker="Mission alignment"
               title="UN Sustainable Development Goals"
               hint="OpenAlex SDG classifier"
@@ -5510,10 +5109,9 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
 
-          <Card className="p-5 lg:col-span-6" collapsible {...bindCard('funders')}>
+          <Card className="p-5 lg:col-span-6">
             <SectionTitle
               icon={Banknote}
-              filterable
               kicker="Funding landscape"
               title="Acknowledged funders"
               hint="From grants metadata; coverage is partial"
@@ -5539,136 +5137,10 @@ export default function ResearchOutputDashboard() {
               />
             </ChartFrame>
           </Card>
-        </div>
-        </CollapsibleSection>
 
-        <CollapsibleSection title="Publishing" subtitle="Where and how much">
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('publishers')}>
-            <SectionTitle
-              icon={Newspaper}
-              filterable
-              kicker="Publishing channels"
-              title={publisherView === 'time'
-                ? `Publisher rank over time · ${countryName(country)}`
-                : `Top publishers carrying ${countryName(country)} output`}
-              hint={publisherView === 'time'
-                ? `${years.length >= 2 ? `${years.length}-year selection` : `5-year window ending ${Math.max(...years)}`} · top 15`
-                : 'Host organisation of the primary location'}
-              count={publisherView === 'top' ? panelN('publishers')?.count : null}
-              countLabel={publisherView === 'top'
-                ? (panelN('publishers')?.truncated ? 'publishers shown · capped at 200' : 'distinct publishers')
-                : null}
-            />
-            <div className="mb-3 flex flex-wrap items-center gap-1">
-              {[
-                { key: 'top', label: 'Top publishers' },
-                { key: 'time', label: 'Rank over time' },
-              ].map((tab) => {
-                const isActive = publisherView === tab.key;
-                return (
-                  <button
-                    key={tab.key}
-                    onClick={() => setPublisherView(tab.key)}
-                    className="rounded-sm px-2.5 py-1 transition-colors"
-                    style={{
-                      border: `1px solid ${isActive ? PALETTE.ink : PALETTE.rule}`,
-                      background: isActive ? PALETTE.ink : 'transparent',
-                      color: isActive ? PALETTE.cream : PALETTE.charcoal,
-                      fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                );
-              })}
-            </div>
-            {publisherView === 'top' ? (
-              <ChartFrame status={state.publishers?.status} error={state.publishers?.error}>
-                <HBar
-                  data={sliceFor('publishers')}
-                  color={PALETTE.teal}
-                  onBarClick={onPick('publishers')}
-                  selectedKeys={selKeys('publishers')}
-                />
-                <ChartControls
-                  total={(state.publishers?.data || []).length}
-                  limit={limitFor('publishers')}
-                  onLimitChange={setLimit('publishers')}
-                  onOpenTable={() => setTableOpenDim('publishers')}
-                />
-              </ChartFrame>
-            ) : (
-              <>
-                <p className="-mt-1 mb-3 max-w-3xl" style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.5 }}>
-                  Each line traces one publisher's rank position across the selected window. Crossings indicate one publisher overtaking another; dramatic swings indicate volatility. Top-ranked publishers in the most recent year carry warmer colours. Hover a line for year-by-year ranks and counts.
-                </p>
-                <RankBumpChart
-                  rows={publisherRankCache.rows}
-                  years={publisherRankCache.years}
-                  topN={15}
-                  status={publisherRankCache.status === 'idle' ? 'loading' : publisherRankCache.status}
-                  accentColor={PALETTE.teal}
-                />
-              </>
-            )}
-          </Card>
-
-          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('oaStatus')}>
-            <SectionTitle
-              icon={BookOpen}
-              filterable
-              kicker="Access regime"
-              title="Open access pathways"
-              hint="Share of works by OA status · click a segment to filter"
-              count={panelN('oaStatus')?.count}
-              countLabel="OA pathways"
-            />
-            <ChartFrame status={state.oaStatus?.status} error={state.oaStatus?.error}>
-              <ProportionBar
-                data={state.oaStatus?.data || []}
-                colorMap={OA_COLORS}
-                onSegmentClick={onPick('oaStatus')}
-                selectedKeys={selKeys('oaStatus')}
-              />
-            </ChartFrame>
-          </Card>
-
-          <ApcPanel
-            years={years}
-            country={country}
-            filters={filters}
-            instFilterIds={
-              (instTypeFilter === 'all' && instSubcategoryFilter === 'all')
-                ? null
-                : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
-            }
-            {...bindCard('apc')}
-          />
-        </div>
-        </CollapsibleSection>
-
-        <CollapsibleSection title="Journal placement" subtitle="Venue standing">
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-          <SjrPanel
-            years={years}
-            country={country}
-            filters={filters}
-            instFilterIds={
-              (instTypeFilter === 'all' && instSubcategoryFilter === 'all')
-                ? null
-                : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
-            }
-            {...bindCard('sjr')}
-          />
-        </div>
-        </CollapsibleSection>
-
-        <CollapsibleSection title="Visibility" subtitle="Reach and impact">
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
           {/* Cited vs uncited overview. In single-year mode shows up to 5 prior
               years for comparison; in multi-year mode shows just the aggregate. */}
-          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('citationReach')}>
+          <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={Sparkles}
               kicker="Citation reach"
@@ -5736,126 +5208,18 @@ export default function ResearchOutputDashboard() {
             baseFilterStr={filterStrings.all}
             countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
             activeFilters={filters}
-            enabled={cardOpen.citationInsight}
-            {...bindCard('citationInsight')}
           />
 
-          {/* Citation impact by open access status. Three tabs share the same
-              underlying data (six per-OA-status fetches in the main effect):
-              average citations per work (default), total citations, and the
-              share of works that have been cited at least once. */}
-          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('oaImpact')}>
-            <SectionTitle
-              icon={Sparkles}
-              kicker="Open access impact"
-              title="Citation impact by open access status"
-              hint={
-                oaImpactTab === 'avg' ? 'Mean citations received per work, by OA pathway'
-                : oaImpactTab === 'total' ? 'Total citations received, by OA pathway'
-                : 'Share of works with at least one citation, by OA pathway'
-              }
-              count={(() => {
-                const d = state.oaImpact?.data;
-                if (!d) return null;
-                let tot = 0; for (const k of Object.keys(d)) tot += d[k].works;
-                return tot || null;
-              })()}
-              countLabel="OA-classified works"
-            />
-            <div className="mb-3 flex flex-wrap items-center gap-1">
-              {[
-                { key: 'avg',   label: 'Avg citations/work' },
-                { key: 'cited', label: 'Cited share' },
-                { key: 'total', label: 'Total citations' },
-              ].map((tab) => {
-                const active = oaImpactTab === tab.key;
-                return (
-                  <button key={tab.key} onClick={() => setOaImpactTab(tab.key)}
-                    className="rounded-sm px-2.5 py-1 transition-colors"
-                    style={{
-                      border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
-                      background: active ? PALETTE.ink : 'transparent',
-                      color: active ? PALETTE.cream : PALETTE.charcoal,
-                      fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
-                    }}>
-                    {tab.label}
-                  </button>
-                );
-              })}
-            </div>
-            <ChartFrame
-              status={state.oaImpact?.status}
-              error={state.oaImpact?.error}
-              hint="Total citations and average citations per work both accumulate over time; very recent works will read low. Cited share is a less age-sensitive lens."
-            >
-              {(() => {
-                const d = state.oaImpact?.data || {};
-                const order = ['gold', 'hybrid', 'green', 'bronze', 'diamond', 'closed'];
-                const rows = order.map((s) => {
-                  const r = d[s] || { cites: 0, works: 0, cited: 0 };
-                  const avg = r.works ? r.cites / r.works : 0;
-                  const citedShare = r.works ? r.cited / r.works : 0;
-                  let value, display;
-                  if (oaImpactTab === 'avg') {
-                    value = avg;
-                    display = `${avg.toFixed(2)} cites/work · ${fmtFull(r.works)} works`;
-                  } else if (oaImpactTab === 'total') {
-                    value = r.cites;
-                    display = `${fmtFull(r.cites)} cites · ${fmtFull(r.works)} works`;
-                  } else {
-                    value = citedShare * 100;
-                    display = `${(citedShare * 100).toFixed(1)}% · ${fmtFull(r.cited)} of ${fmtFull(r.works)}`;
-                  }
-                  return { key: s, label: s.charAt(0).toUpperCase() + s.slice(1), value, display, works: r.works, color: OA_COLORS[s] || PALETTE.charcoal };
-                }).filter((r) => r.works > 0)
-                  .sort((a, b) => b.value - a.value);
-
-                if (rows.length === 0) {
-                  return (
-                    <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.muted }} className="px-2 py-6">
-                      No OA-classified works in this selection.
-                    </div>
-                  );
-                }
-                const max = Math.max(1, ...rows.map((r) => r.value));
-                return (
-                  <div className="space-y-2 py-2">
-                    {rows.map((r) => (
-                      <div key={r.key} className="flex items-center gap-3">
-                        <div style={{ width: 90, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, textAlign: 'right', flex: 'none' }}>
-                          {r.label}
-                        </div>
-                        <div className="flex-1" style={{ height: 22, position: 'relative', background: PALETTE.cream, borderRadius: 2 }}>
-                          <div style={{ width: `${(r.value / max) * 100}%`, background: r.color, height: '100%', borderRadius: 2, transition: 'width 0.4s ease' }} />
-                        </div>
-                        <div style={{ width: 260, fontFamily: FONT_MONO, fontSize: 11.5, color: PALETTE.ink, flex: 'none' }}>
-                          {r.display}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </ChartFrame>
-          </Card>
-
-          <SjrImpactPanel
-            years={years}
+          <DataAvailabilitySection
             country={country}
-            filters={filters}
-            instFilterIds={
-              (instTypeFilter === 'all' && instSubcategoryFilter === 'all')
-                ? null
-                : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
-            }
-            {...bindCard('sjrImpact')}
+            baseFilterStr={filterStrings.all}
           />
 
-          <Card className="p-5 lg:col-span-12" collapsible {...bindCard('topWorks')}>
+          <Card className="p-5 lg:col-span-12">
             <SectionTitle
               icon={TrendingUp}
               kicker="Visibility"
-              title="Prominent works"
+              title="Most-cited works in selection"
               hint="Live ranking; very recent works under-cite"
               count={state.topWorks?.data ? state.topWorks.data.length : null}
               countLabel="top works ranked"
@@ -5933,7 +5297,6 @@ export default function ResearchOutputDashboard() {
             </ChartFrame>
           </Card>
         </div>
-        </CollapsibleSection>
 
         <Card className="mt-6 p-6">
           <SectionTitle icon={Database} kicker="Methods & caveats" title="On reading these numbers" />
