@@ -104,12 +104,14 @@ const DIMENSIONS = {
   institutions: { filterKey: 'authorships.institutions.id',                 label: 'Institution', filterable: true },
   fields:       { filterKey: 'primary_topic.field.id',                      label: 'Field',       filterable: true },
   subfields:    { filterKey: 'primary_topic.subfield.id',                   label: 'Subfield',    filterable: true },
-  // Document type and language: filtering is disabled because in practice combining
-  // these with the country_code filter collapses most other panels to empty results,
-  // suggesting OpenAlex's joint distributions for these dimensions don't behave the
-  // way faceted-search UIs expect. The charts still display the breakdown, just
-  // without click-to-filter.
-  docTypes:     { filterKey: 'type',                                        label: 'Type',        filterable: false },
+  // Document type: filtering is enabled. Click "dataset" to reframe the entire
+  // dashboard around dataset publications, "book" for books, etc. Some panel
+  // labels read oddly under a non-article type ("Publishers" becomes
+  // effectively "repositories" for datasets, "OA status" is designed for
+  // articles) — an inline note surfaces this when a docTypes filter is active.
+  // Language filtering remains disabled because language combined with other
+  // filters can collapse joint distributions in ways that hide real data.
+  docTypes:     { filterKey: 'type',                                        label: 'Type',        filterable: true },
   oaStatus:     { filterKey: 'open_access.oa_status',                       label: 'OA',          filterable: true },
   publishers:   { filterKey: 'primary_location.source.host_organization',   label: 'Publisher',   filterable: true },
   languages:    { filterKey: 'language',                                    label: 'Language',    filterable: false },
@@ -2103,384 +2105,6 @@ const RankBumpChart = ({ rows, years, topN = 15, status, accentColor }) => {
         </div>
       )}
     </div>
-  );
-};
-
-
-// Research data availability section. Measures dataset publications by
-// country-affiliated researchers: OpenAlex works classified as type=dataset,
-// scoped to the same country/filter selection as the rest of the dashboard.
-//
-// The section deliberately measures DEPOSIT ACTIVITY, not article-linked-data
-// rates. The distinction matters:
-//
-//   - "How many datasets do Thai researchers deposit?" — answerable, defensible,
-//     uses documented filters. This is what we report.
-//   - "How many Thai articles have their data linked?" — not answerable from
-//     the OpenAlex API alone; the datasets-per-article linkage would require
-//     per-work related_works traversal (thousands of extra calls per section
-//     load), and even then coverage is partial. Left out on purpose.
-//
-// Every filter used here is verified against the OpenAlex API reference:
-// `type:dataset`, `authorships.institutions.country_code`, `grants.funder`,
-// `authorships.institutions.id`, plus the same base filter chain the rest of
-// the dashboard uses. No speculative fields.
-//
-// API cost: 6 calls total, all lazy (fired only when the user clicks Load).
-//   1. Dataset count for current selection.
-//   2. Article count for current selection (denominator for the ratio metric).
-//   3. Dataset count for previous year (for the YoY delta card).
-//   4. Group-by funder on the dataset subset.
-//   5. Group-by institution on the dataset subset.
-//   6. Top-cited dataset works (for the prominent-works list).
-const DataAvailabilitySection = ({ country, baseFilterStr, year, years, countryInstitutionIds = [] }) => {
-  const [data, setData] = React.useState({ status: 'idle' });
-  const [cachedFor, setCachedFor] = React.useState(null);
-
-  // Precompute the roster set for fast institution-filter membership checks.
-  // We stringify to a stable dependency key rather than passing the array to
-  // useMemo directly (which would recompute on every parent render).
-  const rosterKey = countryInstitutionIds.slice(0, 200).join(',');
-  const rosterSet = React.useMemo(() => new Set(countryInstitutionIds), [rosterKey]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const load = React.useCallback(() => {
-    setData({ status: 'loading' });
-    const sig = `${baseFilterStr}::${year}::${rosterKey}`;
-    setCachedFor(sig);
-    let cancelled = false;
-
-    // Compose the six URLs. All share the same base filter and simply add or
-    // swap the `type:` clause and grouping directives.
-    const datasetFilter = `${baseFilterStr},type:dataset`;
-    const articleFilter = `${baseFilterStr},type:article`;
-    // For YoY we swap the year in the base filter. This regex mirrors the one
-    // in the Citation Reach card so single-year and multi-year forms both work.
-    // In multi-year mode we compare the max year against max-1.
-    const anchorYear = year;
-    const prevYear = anchorYear - 1;
-    const prevYearFilter = baseFilterStr.replace(
-      /publication_year:[0-9|]+/,
-      `publication_year:${prevYear}`
-    ) + ',type:dataset';
-
-    const q = (filter, extras = '') =>
-      withMailto(`${OPENALEX_BASE}/works?filter=${filter}${extras}`);
-
-    const urls = [
-      q(datasetFilter, '&per-page=1'),
-      q(articleFilter, '&per-page=1'),
-      q(prevYearFilter, '&per-page=1'),
-      q(datasetFilter, '&group_by=grants.funder&per-page=100'),
-      q(datasetFilter, '&group_by=authorships.institutions.id&per-page=100'),
-      q(datasetFilter, '&sort=cited_by_count:desc&per-page=20&select=id,doi,display_name,cited_by_count,publication_year,primary_location,type'),
-    ];
-
-    Promise.all(urls.map((u) => fetchJson(u).catch((e) => ({ __err: e.message }))))
-      .then(([dsCount, artCount, prevDsCount, funderGroup, instGroup, topWorks]) => {
-        if (cancelled) return;
-
-        // Any hard failure? Surface the first error we see.
-        for (const r of [dsCount, artCount, prevDsCount, funderGroup, instGroup, topWorks]) {
-          if (r?.__err) {
-            setData({ status: 'error', error: r.__err });
-            return;
-          }
-        }
-
-        const totalDatasets = dsCount?.meta?.count ?? 0;
-        const totalArticles = artCount?.meta?.count ?? 0;
-        const prevYearDatasets = prevDsCount?.meta?.count ?? 0;
-        const yoyDelta = totalDatasets - prevYearDatasets;
-        const yoyPct = prevYearDatasets > 0 ? (yoyDelta / prevYearDatasets) * 100 : null;
-        const perThousandArticles = totalArticles > 0
-          ? (totalDatasets / totalArticles) * 1000
-          : null;
-
-        // Funder breakdown: take the top 10 by count. OpenAlex returns
-        // key_display_name for each group, so labels come free.
-        const funders = (funderGroup?.group_by || [])
-          .slice(0, 10)
-          .map((g) => ({
-            key: g.key,
-            label: g.key_display_name || 'Unknown funder',
-            count: g.count || 0,
-          }))
-          .filter((f) => f.count > 0);
-
-        // Institution breakdown: filter to the country roster (so foreign
-        // co-affiliations don't dominate), then take the top 15.
-        const rawInsts = (instGroup?.group_by || []).map((g) => ({
-          key: g.key,
-          label: g.key_display_name || 'Unknown institution',
-          count: g.count || 0,
-        }));
-        const institutions = (rosterSet.size > 0
-          ? rawInsts.filter((r) => rosterSet.has(r.key))
-          : rawInsts
-        ).slice(0, 15);
-
-        // Prominent works: already sorted by citations descending.
-        const prominent = (topWorks?.results || []).map((w) => ({
-          key: w.id,
-          doi: w.doi,
-          title: w.display_name || 'Untitled',
-          citations: w.cited_by_count || 0,
-          year: w.publication_year,
-          venue: w.primary_location?.source?.display_name,
-        }));
-
-        setData({
-          status: 'ready',
-          totalDatasets,
-          totalArticles,
-          prevYearDatasets,
-          prevYearLabel: prevYear,
-          yoyDelta,
-          yoyPct,
-          perThousandArticles,
-          funders,
-          institutions,
-          prominent,
-        });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setData({ status: 'error', error: err.message });
-      });
-
-    return () => { cancelled = true; };
-  }, [baseFilterStr, year, rosterKey, rosterSet]);
-
-  // Invalidate cache when the inputs change.
-  React.useEffect(() => {
-    const sig = `${baseFilterStr}::${year}::${rosterKey}`;
-    if (cachedFor !== null && cachedFor !== sig) {
-      setData({ status: 'idle' });
-      setCachedFor(null);
-    }
-  }, [baseFilterStr, year, rosterKey, cachedFor]);
-
-  // Small helper for the top row of stat cards.
-  const StatCard = ({ label, value, sublabel, valueColor = PALETTE.ink }) => (
-    <div className="rounded-sm px-4 py-3" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.muted, letterSpacing: '0.14em' }} className="uppercase">{label}</div>
-      <div style={{ fontFamily: FONT_DISPLAY, fontSize: 28, fontWeight: 500, fontStyle: 'italic', color: valueColor, lineHeight: 1.15 }} className="mt-0.5">
-        {value}
-      </div>
-      {sublabel && (
-        <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }}>
-          {sublabel}
-        </div>
-      )}
-    </div>
-  );
-
-  const RankedBars = ({ rows, colorHex, emptyMsg }) => {
-    if (!rows || rows.length === 0) {
-      return (
-        <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.muted }} className="px-3 py-6">
-          {emptyMsg}
-        </div>
-      );
-    }
-    const maxCount = Math.max(1, ...rows.map((r) => r.count));
-    return (
-      <ol className="space-y-1.5">
-        {rows.map((r, i) => {
-          const widthPct = (r.count / maxCount) * 100;
-          return (
-            <li key={r.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '20px 1fr 60px' }}>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, textAlign: 'right' }}>{i + 1}</span>
-              <div className="relative" style={{ height: 22, background: PALETTE.cream, borderRadius: 2 }}>
-                <div
-                  style={{
-                    position: 'absolute', left: 0, top: 0, bottom: 0,
-                    width: `${Math.max(widthPct, 2)}%`,
-                    background: colorHex,
-                    opacity: 0.22,
-                    borderRadius: 2,
-                  }}
-                />
-                <span
-                  className="absolute inset-y-0 left-2 right-2 flex items-center"
-                  style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.ink, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}
-                  title={r.label}
-                >
-                  {r.label}
-                </span>
-              </div>
-              <div style={{ textAlign: 'right', fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
-                {fmtFull(r.count)}
-              </div>
-            </li>
-          );
-        })}
-      </ol>
-    );
-  };
-
-  return (
-    <Card className="p-5 lg:col-span-12">
-      <SectionTitle
-        icon={Database}
-        kicker="Research data availability"
-        title={`Dataset publications by ${countryName(country)}-affiliated researchers`}
-        hint="Works with type = dataset, sourced from Crossref and DataCite"
-      />
-      <p
-        className="-mt-2 mb-4 max-w-4xl"
-        style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
-      >
-        This section measures deposit activity: works OpenAlex classifies as datasets
-        (versus articles, books, etc.) where at least one author is affiliated with a
-        {' '}{countryName(country)} institution. Deposits come from DataCite-registered
-        repositories and Crossref-registered data DOIs. The section does <strong>not</strong>{' '}
-        measure how many articles have their linked data findable in OpenAlex, which is
-        a different and harder question. Read these numbers as "how much data has the
-        community published," not as "what fraction of articles share data."
-      </p>
-
-      {data.status === 'idle' && (
-        <div className="rounded-sm px-4 py-6 text-center" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-          <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, marginBottom: 12 }}>
-            This section loads on demand.
-          </div>
-          <button
-            onClick={load}
-            className="rounded-sm px-4 py-2"
-            style={{
-              background: PALETTE.ink,
-              color: PALETTE.cream,
-              fontFamily: FONT_MONO,
-              fontSize: 12,
-              letterSpacing: '0.04em',
-              border: `1px solid ${PALETTE.ink}`,
-            }}
-          >
-            Load dataset publication analysis
-          </button>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, marginTop: 10 }}>
-            Fires 6 API calls (counts, breakdowns, top works).
-          </div>
-        </div>
-      )}
-
-      {data.status === 'loading' && (
-        <div className="flex items-center gap-2 rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
-          <Loader2 size={14} className="animate-spin" />
-          <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
-            Counting dataset works, computing breakdowns…
-          </span>
-        </div>
-      )}
-
-      {data.status === 'error' && (
-        <div className="rounded-sm px-4 py-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}`, color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
-          Could not load: {data.error}. <button onClick={load} style={{ textDecoration: 'underline', color: PALETTE.ink, fontFamily: FONT_MONO, fontSize: 12 }}>Retry</button>
-        </div>
-      )}
-
-      {data.status === 'ready' && (
-        <>
-          {/* Top stat cards */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4 mb-5">
-            <StatCard
-              label="Dataset works"
-              value={fmtFull(data.totalDatasets)}
-              sublabel={`in selection`}
-            />
-            <StatCard
-              label="Article works"
-              value={fmtFull(data.totalArticles)}
-              sublabel="for comparison"
-              valueColor={PALETTE.muted}
-            />
-            <StatCard
-              label="Datasets per 1,000 articles"
-              value={data.perThousandArticles != null ? data.perThousandArticles.toFixed(1) : '—'}
-              sublabel="ratio metric"
-              valueColor={PALETTE.forest}
-            />
-            <StatCard
-              label={`vs ${data.prevYearLabel}`}
-              value={
-                data.yoyPct != null
-                  ? `${data.yoyDelta >= 0 ? '+' : ''}${data.yoyPct.toFixed(0)}%`
-                  : '—'
-              }
-              sublabel={`${fmtFull(data.prevYearDatasets)} datasets in ${data.prevYearLabel}`}
-              valueColor={data.yoyDelta >= 0 ? PALETTE.forest : PALETTE.burgundy}
-            />
-          </div>
-
-          {/* Funder and institution breakdowns side by side */}
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 mb-5">
-            <div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }} className="uppercase mb-2">
-                Datasets by funder · top 10
-              </div>
-              <RankedBars
-                rows={data.funders}
-                colorHex={PALETTE.forest}
-                emptyMsg="No funder attribution on the sampled dataset works."
-              />
-            </div>
-            <div>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }} className="uppercase mb-2">
-                Datasets by {countryName(country)} institution · top 15
-              </div>
-              <RankedBars
-                rows={data.institutions}
-                colorHex={PALETTE.navy}
-                emptyMsg={`No ${countryName(country)}-institution attribution on the sampled dataset works.`}
-              />
-            </div>
-          </div>
-
-          {/* Prominent dataset works */}
-          <div>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }} className="uppercase mb-2">
-              Most-cited dataset works · top {data.prominent.length}
-            </div>
-            {data.prominent.length === 0 ? (
-              <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.muted }} className="px-3 py-4">
-                No dataset works found in the current selection.
-              </div>
-            ) : (
-              <ol className="space-y-1">
-                {data.prominent.map((w, i) => (
-                  <li key={w.key} className="rounded-sm px-3 py-2" style={{ background: i % 2 === 0 ? PALETTE.cream : 'transparent', border: `1px solid ${PALETTE.rule}` }}>
-                    <div className="flex items-baseline gap-3">
-                      <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, minWidth: 20 }}>{i + 1}</span>
-                      <div className="flex-1 min-w-0">
-                        <a
-                          href={w.doi || w.key}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.ink, textDecoration: 'none', fontWeight: 500 }}
-                          onMouseOver={(e) => (e.currentTarget.style.textDecoration = 'underline')}
-                          onMouseOut={(e) => (e.currentTarget.style.textDecoration = 'none')}
-                        >
-                          {w.title}
-                        </a>
-                        <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }} className="mt-0.5">
-                          {w.venue && <span>{w.venue}</span>}
-                          {w.venue && w.year && <span> · </span>}
-                          {w.year && <span>{w.year}</span>}
-                        </div>
-                      </div>
-                      <div style={{ textAlign: 'right', whiteSpace: 'nowrap', fontFamily: FONT_MONO, fontSize: 11, color: PALETTE.ink, fontWeight: 500 }}>
-                        {fmtFull(w.citations)} cites
-                      </div>
-                    </div>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </div>
-        </>
-      )}
-    </Card>
   );
 };
 
@@ -4593,6 +4217,31 @@ export default function ResearchOutputDashboard() {
             onClear={clearFilters}
             innerRef={breadcrumbAnchorRef}
           />
+          {/* Reframing note: appears when a docTypes filter is active on a
+              type other than 'article'. Some panel labels ('Publishers', 'OA
+              status') read differently under a non-article type — the label
+              text doesn't change, but the meaning shifts (e.g. 'Publishers'
+              becomes effectively 'repositories' under type:dataset). This
+              note surfaces the shift so readers can interpret the numbers
+              correctly. */}
+          {(filters.docTypes || []).some((f) => f.value !== 'article') && (
+            <div
+              className="mt-2 rounded-md px-3 py-2"
+              style={{
+                background: PALETTE.cream,
+                borderLeft: `3px solid ${PALETTE.gold}`,
+                fontFamily: FONT_BODY,
+                fontSize: 12,
+                color: PALETTE.charcoal,
+                lineHeight: 1.5,
+              }}
+            >
+              <strong style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.14em' }}>NOTE</strong>{' '}
+              With a non-article document type active, some panels shift meaning: <em>Publishers</em> reads as repositories or hosting platforms (Zenodo, Dryad, DataCite);
+              <em> OA status</em> is designed for articles and may not classify cleanly for datasets, books, or preprints. The counts are correct; the labels just carry
+              different implied semantics.
+            </div>
+          )}
         </div>
       </header>
 
@@ -5167,14 +4816,6 @@ export default function ResearchOutputDashboard() {
             baseFilterStr={filterStrings.all}
             countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
             activeFilters={filters}
-          />
-
-          <DataAvailabilitySection
-            country={country}
-            baseFilterStr={filterStrings.all}
-            year={year}
-            years={years}
-            countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
           />
 
           <Card className="p-5 lg:col-span-12">
