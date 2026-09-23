@@ -3719,11 +3719,8 @@ const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle, onDa
 //   meanDoaj    Mean DOAJ list APC over sampled works with a known price.
 //   totalSpend  Estimated total APC spent (from ApcPanel via `apcShared`).
 //   meanPriced  Estimated spend / priced works (from ApcPanel).
-//   hybridShare Hybrid share of estimated spend (from ApcPanel).
-//   totalWorks  Works in the current selection (from the Publishers panel).
-//   coverage    Share of sampled works carrying a DOAJ list price.
 //
-// The three ApcPanel-based options reuse the figures that ApcPanel already
+// The two ApcPanel-based options reuse the figures that ApcPanel already
 // computes (national precompute, or its live pricing when a filter is active)
 // so this chart and the spend panel always agree and no pricing is repeated.
 // ApcPanel keys publishers by full display name while this chart samples by
@@ -3737,18 +3734,12 @@ const APC_X_MODES = [
   { key: 'meanDoaj',    label: 'Mean APC (DOAJ)',      axis: 'MEAN APC LIST (USD, DOAJ)',                  scale: 'linear', fmt: 'usd', needsApc: false },
   { key: 'totalSpend',  label: 'Total APC spent',      axis: 'ESTIMATED TOTAL APC SPENT (USD, LOG SCALE)', scale: 'log',    fmt: 'usd', needsApc: true },
   { key: 'meanPriced',  label: 'APC per priced work',  axis: 'ESTIMATED APC PER PRICED WORK (USD)',        scale: 'linear', fmt: 'usd', needsApc: true },
-  { key: 'hybridShare', label: 'Hybrid share',         axis: 'HYBRID SHARE OF ESTIMATED SPEND (%)',        scale: 'linear', fmt: 'pct', needsApc: true, fixedMax: 100 },
-  { key: 'totalWorks',  label: 'Total works',          axis: 'WORKS IN SELECTION (LOG SCALE)',             scale: 'log',    fmt: 'count', needsApc: false },
-  { key: 'coverage',    label: 'DOAJ coverage',        axis: 'SAMPLED WORKS WITH A DOAJ APC (%)',          scale: 'linear', fmt: 'pct', needsApc: false, fixedMax: 100 },
 ];
 
 const APC_X_NOTES = {
   meanDoaj: 'Mean DOAJ list price over sampled works that have one; y is mean citations over those same works. Hybrid journals have no DOAJ price, so hybrid-heavy publishers drop out of this view.',
   totalSpend: 'Estimated total spend taken from the Estimated APC spend by publisher panel (your price lists, gold and hybrid, corresponding-author attribution). Log scale. Total spend largely tracks publishing volume, so position here shows where the money goes more than how expensive a publisher is.',
   meanPriced: 'Estimated spend divided by priced works, from the same panel. A price-level measure that, unlike the DOAJ mean, includes hybrid journals.',
-  hybridShare: 'Share of each publisher\u2019s estimated spend that went to hybrid journals rather than fully open access (gold) journals, from the same panel.',
-  totalWorks: 'Works in the current selection, from the Publishers panel. Log scale. A baseline: if citations track volume, APC patterns in the other views may partly be a volume effect.',
-  coverage: 'Share of sampled works carrying a DOAJ list price. A diagnostic for how much of each publisher the DOAJ-based mean actually describes.',
 };
 
 const apcNormPub = (s) => (s || '')
@@ -3900,10 +3891,6 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], apcSha
       if (xMode === 'meanDoaj') {
         if (p.nKnown < 5) continue;
         x = p.meanApc; y = p.meanCitesKnown; size = p.nKnown; field = p.domKnown;
-      } else if (xMode === 'coverage') {
-        x = (p.nKnown / p.nSampled) * 100;
-      } else if (xMode === 'totalWorks') {
-        x = p.totalWorks;
       } else {
         if (!apcIndex) continue;
         const r = apcIndex.get(apcNormPub(p.label));
@@ -3911,10 +3898,6 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], apcSha
         extra = { spend: r.usd, priced: r.priced };
         if (xMode === 'totalSpend') x = r.usd;
         else if (xMode === 'meanPriced') x = r.priced > 0 ? r.usd / r.priced : null;
-        else if (xMode === 'hybridShare') {
-          const denom = (r.gold || 0) + (r.hybrid || 0);
-          x = denom > 0 ? (100 * (r.hybrid || 0)) / denom : null;
-        }
       }
       if (x == null || Number.isNaN(x)) continue;
       if (modeDef.scale === 'log' && x <= 0) continue;
@@ -4058,8 +4041,8 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], apcSha
         style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
       >
         Each dot is one publisher in the top 30 for {countryName(country)}'s current selection. The y position is mean
-        citations per work from a random sample of up to 100 works; the x-axis can be switched between price, spend,
-        volume, and coverage measures. Dot size scales with works; dot colour marks the publisher's most common field.
+        citations per work from a random sample of up to 100 works; the x-axis can be switched between APC price and
+        spend measures. Dot size scales with works; dot colour marks the publisher's most common field.
         Read any pattern with care: it is confounded by venue prestige (a Nature-tier publisher sits high regardless of
         what it charges) and by field (biomedical publishers cluster differently from the humanities). The field colouring
         makes the between-field component visible so it isn't mistaken for a within-field trend.
