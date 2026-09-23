@@ -31,7 +31,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // burning your daily credits, which OpenAlex's per-IP rate limit largely
 // prevents anyway). If you'd rather hide the key, the proper path is a
 // small backend proxy that adds the key server-side.
-const OPENALEX_API_KEY = 'wPzRa7six3VGUf4dYxNYmv'; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
+const OPENALEX_API_KEY = ''; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -3720,7 +3720,7 @@ const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle }) =>
 //
 // API cost: one /works call per top-30 publisher, sample=100. Lazy-loaded via
 // a Load button so nothing fires on section render.
-const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [] }) => {
+const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, onToggle }) => {
   const [data, setData] = React.useState({ status: 'idle' });
   const [cachedFor, setCachedFor] = React.useState(null);
 
@@ -3964,7 +3964,7 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [] }) => {
   };
 
   return (
-    <Card className="p-5 lg:col-span-12">
+    <Card className="p-5 lg:col-span-12" collapsible open={open} onToggle={onToggle}>
       <SectionTitle
         icon={TrendingUp}
         kicker="APC vs citation impact"
@@ -4682,7 +4682,7 @@ export default function ResearchOutputDashboard() {
     institutions: true,
     fields: false, subfields: false, docTypes: false, languages: false,
     collaborators: false, sdgs: false, funders: false,
-    publishers: true, oaStatus: false, apc: false,
+    publishers: true, oaStatus: false, apc: false, apcCitation: false,
     sjr: true,
     citationReach: true, citationInsight: false, oaImpact: false,
     sjrImpact: false, topWorks: false,
@@ -6093,6 +6093,7 @@ export default function ResearchOutputDashboard() {
             country={country}
             baseFilterStr={filterStrings.all}
             topPublishers={state.publishers?.data || []}
+            {...bindCard('apcCitation')}
           />
         </div>
         </CollapsibleSection>
