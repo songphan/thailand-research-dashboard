@@ -3476,7 +3476,7 @@ const OaSplit = ({ gold, hybrid }) => {
   );
 };
 
-const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle }) => {
+const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle, onData }) => {
   const apcReady = apcData && apcData.status !== 'placeholder' && (apcData.by_publisher || []).length > 0;
   const hasChips = Object.values(filters || {}).some((arr) => (arr || []).length > 0);
   const hasInst = Array.isArray(instFilterIds) && instFilterIds.length > 0;
@@ -3563,6 +3563,22 @@ const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle }) =>
     })();
     return () => { cancelled = true; };
   }, [country, JSON.stringify(years), JSON.stringify(filters), JSON.stringify(instFilterIds || null)]);
+
+  // Share this panel's per-publisher figures with the APC vs citation impact
+  // section, so its spend-based x-axis options use exactly these numbers and
+  // no pricing is repeated. Adds no API calls: it only reports what this panel
+  // has already computed (national precompute, or live pricing when filtered).
+  useEffect(() => {
+    if (!onData) return;
+    if (country !== 'TH') { onData({ status: 'unavailable', reason: 'country' }); return; }
+    if (filterActive) {
+      if (live.status === 'ready') onData({ status: 'ready', source: 'live', rows: live.rows });
+      else onData({ status: live.status === 'idle' ? 'loading' : live.status, source: 'live' });
+      return;
+    }
+    if (national) onData({ status: 'ready', source: 'national', rows: national.rows });
+    else onData({ status: 'unavailable', reason: 'precompute' });
+  }, [country, filterActive, live, national, onData]);
 
   const header = (hint) => (
     <SectionTitle icon={Banknote} kicker="Open access fees" title="Estimated APC spend by publisher" hint={hint} />
@@ -3695,38 +3711,73 @@ const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle }) =>
 };
 
 
-// APC vs citation impact section. Publisher-level scatter that plots each
-// publisher's mean article-processing charge (list price, USD) against its
-// mean citations per work. Dot size scales with the number of qualifying
-// works; dot color encodes the publisher's most common OpenAlex field.
+// APC vs citation impact section. Publisher-level scatter: y is mean citations
+// per work, x is a selectable publisher-level variable. Dot size scales with
+// works; dot colour marks the publisher's most common OpenAlex field.
 //
-// FRAMING NOTE: this is Option B from the design discussion. The question
-// being answered is NOT "does paying a higher APC yield more citations for
-// a given paper" (a work-level question that OpenAlex data cannot cleanly
-// answer because of field confounding). It IS "among the publishers this
-// country's researchers use, do the higher-APC ones deliver more citations
-// on average" (a venue-level question that the data can answer, subject
-// to venue prestige confounding (a Nature-tier publisher will dominate at
-// the top-right regardless of its APC being causally related to citations).
-// The field-color encoding lets readers see whether any observed correlation
-// is within-field or driven by between-field differences.
+// X-axis options:
+//   meanDoaj    Mean DOAJ list APC over sampled works with a known price.
+//   totalSpend  Estimated total APC spent (from ApcPanel via `apcShared`).
+//   meanPriced  Estimated spend / priced works (from ApcPanel).
+//   hybridShare Hybrid share of estimated spend (from ApcPanel).
+//   totalWorks  Works in the current selection (from the Publishers panel).
+//   coverage    Share of sampled works carrying a DOAJ list price.
 //
-// APC PROVENANCE NOTES:
-// - `apc_list.value_usd` comes from DOAJ. Coverage is partial: only publishers
-//   whose journals are DOAJ-indexed have list-price data. Hybrid journals and
-//   non-DOAJ venues have null and get excluded.
-// - Diamond OA journals have `apc_list.value = 0`. That's a real signal, not
-//   missing data. A publisher whose mean APC is zero is legitimately at x=0.
+// The three ApcPanel-based options reuse the figures that ApcPanel already
+// computes (national precompute, or its live pricing when a filter is active)
+// so this chart and the spend panel always agree and no pricing is repeated.
+// ApcPanel keys publishers by full display name while this chart samples by
+// OpenAlex publisher ID, so the join uses the full host_organization_name read
+// from the sampled works, normalised. Unmatched publishers are listed in the
+// footnote so mismatches are visible rather than silent.
 //
-// API cost: one /works call per top-30 publisher, sample=100. Lazy-loaded via
-// a Load button so nothing fires on section render.
-const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, onToggle }) => {
+// API cost: one /works call per top-30 publisher (sample=100), lazy via Load.
+// Switching the x-axis never refetches.
+const APC_X_MODES = [
+  { key: 'meanDoaj',    label: 'Mean APC (DOAJ)',      axis: 'MEAN APC LIST (USD, DOAJ)',                  scale: 'linear', fmt: 'usd', needsApc: false },
+  { key: 'totalSpend',  label: 'Total APC spent',      axis: 'ESTIMATED TOTAL APC SPENT (USD, LOG SCALE)', scale: 'log',    fmt: 'usd', needsApc: true },
+  { key: 'meanPriced',  label: 'APC per priced work',  axis: 'ESTIMATED APC PER PRICED WORK (USD)',        scale: 'linear', fmt: 'usd', needsApc: true },
+  { key: 'hybridShare', label: 'Hybrid share',         axis: 'HYBRID SHARE OF ESTIMATED SPEND (%)',        scale: 'linear', fmt: 'pct', needsApc: true, fixedMax: 100 },
+  { key: 'totalWorks',  label: 'Total works',          axis: 'WORKS IN SELECTION (LOG SCALE)',             scale: 'log',    fmt: 'count', needsApc: false },
+  { key: 'coverage',    label: 'DOAJ coverage',        axis: 'SAMPLED WORKS WITH A DOAJ APC (%)',          scale: 'linear', fmt: 'pct', needsApc: false, fixedMax: 100 },
+];
+
+const APC_X_NOTES = {
+  meanDoaj: 'Mean DOAJ list price over sampled works that have one; y is mean citations over those same works. Hybrid journals have no DOAJ price, so hybrid-heavy publishers drop out of this view.',
+  totalSpend: 'Estimated total spend taken from the Estimated APC spend by publisher panel (your price lists, gold and hybrid, corresponding-author attribution). Log scale. Total spend largely tracks publishing volume, so position here shows where the money goes more than how expensive a publisher is.',
+  meanPriced: 'Estimated spend divided by priced works, from the same panel. A price-level measure that, unlike the DOAJ mean, includes hybrid journals.',
+  hybridShare: 'Share of each publisher\u2019s estimated spend that went to hybrid journals rather than fully open access (gold) journals, from the same panel.',
+  totalWorks: 'Works in the current selection, from the Publishers panel. Log scale. A baseline: if citations track volume, APC patterns in the other views may partly be a volume effect.',
+  coverage: 'Share of sampled works carrying a DOAJ list price. A diagnostic for how much of each publisher the DOAJ-based mean actually describes.',
+};
+
+const apcNormPub = (s) => (s || '')
+  .toLowerCase()
+  .replace(/\./g, '')
+  .replace(/&/g, ' and ')
+  .replace(/[^a-z0-9]+/g, ' ')
+  .replace(/\b(the|ltd|limited|inc|co|corp|gmbh|bv|llc|plc|sa|ag|srl|pvt|pte)\b/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const apcFmtX = (v, fmt) => {
+  if (v == null || Number.isNaN(v)) return '';
+  if (fmt === 'pct') return `${Math.round(v)}%`;
+  if (fmt === 'usd') {
+    if (v >= 1e6) return `$${(v / 1e6).toFixed(v >= 1e7 ? 0 : 1)}M`;
+    if (v >= 1e3) return `$${(v / 1e3).toFixed(v >= 1e4 ? 0 : 1)}K`;
+    return `$${Math.round(v)}`;
+  }
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e4) return `${Math.round(v / 1e3)}K`;
+  return Math.round(v).toLocaleString();
+};
+
+const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], apcShared = { status: 'idle' }, open, onToggle }) => {
   const [data, setData] = React.useState({ status: 'idle' });
   const [cachedFor, setCachedFor] = React.useState(null);
+  const [xMode, setXMode] = React.useState('meanDoaj');
 
-  // Which publishers to analyze: take the parent's top publishers list and cap
-  // at 30. Each requires one API call, so 30 is a good balance of coverage vs
-  // budget. If the parent hasn't loaded publishers yet the section is inert.
   const publisherKey = topPublishers.slice(0, 30).map((p) => p.key).join(',');
 
   const load = React.useCallback(() => {
@@ -3737,22 +3788,17 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
 
     const publishers = topPublishers.slice(0, 30);
     if (publishers.length === 0) {
-      setData({ status: 'ready', points: [], fields: [], totalPublishersConsidered: 0 });
+      setData({ status: 'ready', pubs: [], totalPublishersConsidered: 0 });
       return;
     }
 
-    // For each publisher, fetch a random sample of 100 works filtered to that
-    // publisher, with the fields we need to compute means and dominant field.
-    // Escape the publisher ID as needed. OpenAlex publisher IDs are full URLs
-    // starting with https://openalex.org/, which the normalizeFilterValue helper
-    // (used by chip filters) handles for us.
     const fetchPublisher = async (pub) => {
       const idNorm = normalizeFilterValue(pub.key);
       const filter = `${baseFilterStr},primary_location.source.host_organization:${idNorm}`;
       const url = withMailto(
         `${OPENALEX_BASE}/works?filter=${filter}` +
         `&sample=100&per-page=100` +
-        `&select=id,cited_by_count,apc_list,primary_topic`
+        `&select=id,cited_by_count,apc_list,primary_topic,primary_location`
       );
       try {
         const j = await fetchJson(url);
@@ -3762,71 +3808,52 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
       }
     };
 
+    const dominant = (works) => {
+      const counts = new Map();
+      for (const w of works) {
+        const f = w.primary_topic?.field?.display_name || 'Unknown';
+        counts.set(f, (counts.get(f) || 0) + 1);
+      }
+      let best = 'Unknown', bestN = 0;
+      for (const [f, c] of counts) if (c > bestN) { best = f; bestN = c; }
+      return best;
+    };
+    const mean = (arr, fn) => (arr.length ? arr.reduce((s, w) => s + fn(w), 0) / arr.length : 0);
+
     Promise.all(publishers.map(fetchPublisher)).then((perPub) => {
       if (cancelled) return;
-
-      const MIN_APC_KNOWN = 5;
-      const points = [];
+      const pubs = [];
       for (const { pub, results } of perPub) {
-        if (!results || results.length === 0) continue;
-        // Works with a known APC list value (including zero for diamond OA).
-        // Null means DOAJ has no listed APC for that venue.
-        const withKnownApc = results.filter((w) => {
+        if (!results || results.length < 5) continue;
+        const known = results.filter((w) => {
           const v = w.apc_list?.value_usd;
           return typeof v === 'number' && !Number.isNaN(v);
         });
-        if (withKnownApc.length < MIN_APC_KNOWN) continue;
-        const meanApc = withKnownApc.reduce((s, w) => s + (w.apc_list.value_usd || 0), 0) / withKnownApc.length;
-        const meanCites = withKnownApc.reduce((s, w) => s + (w.cited_by_count || 0), 0) / withKnownApc.length;
-        // Dominant field: count each work's primary_topic.field, pick the mode.
-        const fieldCounts = new Map();
-        for (const w of withKnownApc) {
-          const fieldName = w.primary_topic?.field?.display_name || 'Unknown';
-          fieldCounts.set(fieldName, (fieldCounts.get(fieldName) || 0) + 1);
+        // Full publisher name: the Publishers panel label is truncated, so
+        // read host_organization_name from the sampled works instead.
+        const nameCounts = new Map();
+        for (const w of results) {
+          const n = w.primary_location?.source?.host_organization_name;
+          if (n) nameCounts.set(n, (nameCounts.get(n) || 0) + 1);
         }
-        let dominantField = 'Unknown';
-        let dominantCount = 0;
-        for (const [f, c] of fieldCounts) {
-          if (c > dominantCount) { dominantField = f; dominantCount = c; }
-        }
-        points.push({
+        let fullName = pub.label || pub.key;
+        let nameN = 0;
+        for (const [n, c] of nameCounts) if (c > nameN) { fullName = n; nameN = c; }
+
+        pubs.push({
           key: pub.key,
-          label: pub.label || pub.key,
-          nWorks: withKnownApc.length,
+          label: fullName,
+          totalWorks: pub.value || 0,
           nSampled: results.length,
-          meanApc,
-          meanCites,
-          dominantField,
+          nKnown: known.length,
+          meanApc: mean(known, (w) => w.apc_list.value_usd || 0),
+          meanCitesKnown: mean(known, (w) => w.cited_by_count || 0),
+          meanCitesAll: mean(results, (w) => w.cited_by_count || 0),
+          domKnown: dominant(known),
+          domAll: dominant(results),
         });
       }
-
-      // Determine color palette: top 6 fields by publisher-count get distinct
-      // colors, everything else is "Other" (gray). This keeps the legend
-      // readable at a glance.
-      const fieldPubCounts = new Map();
-      for (const p of points) {
-        fieldPubCounts.set(p.dominantField, (fieldPubCounts.get(p.dominantField) || 0) + 1);
-      }
-      const topFields = [...fieldPubCounts.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 6)
-        .map(([f]) => f);
-      // Categorical palette drawn from the existing PALETTE.
-      const FIELD_PALETTE = [
-        PALETTE.navy, PALETTE.burgundy, PALETTE.forest,
-        PALETTE.gold, PALETTE.teal, PALETTE.plum,
-      ];
-      const fieldColor = new Map();
-      topFields.forEach((f, i) => fieldColor.set(f, FIELD_PALETTE[i]));
-
-      setData({
-        status: 'ready',
-        points,
-        fields: topFields.map((f) => ({ label: f, color: fieldColor.get(f) })),
-        otherColor: PALETTE.muted,
-        fieldColorMap: fieldColor,
-        totalPublishersConsidered: publishers.length,
-      });
+      setData({ status: 'ready', pubs, totalPublishersConsidered: publishers.length });
     }).catch((err) => {
       if (cancelled) return;
       setData({ status: 'error', error: err.message });
@@ -3843,7 +3870,66 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
     }
   }, [baseFilterStr, publisherKey, cachedFor]);
 
-  // Scatter rendering. Inlined to keep the section self-contained.
+  const modeDef = APC_X_MODES.find((m) => m.key === xMode) || APC_X_MODES[0];
+  const apcReady = apcShared && apcShared.status === 'ready';
+
+  // Why the APC-panel-based options are unavailable, if they are.
+  const apcUnavailableMsg = (() => {
+    if (apcReady) return null;
+    if (country !== 'TH') return 'Spend-based options use the Estimated APC spend panel, which is calibrated for Thailand only.';
+    const s = apcShared && apcShared.status;
+    if (s === 'loading' || s === 'idle') return 'Waiting for the Estimated APC spend panel to finish pricing the current selection.';
+    if (s === 'toolarge') return 'The Estimated APC spend panel cannot price this selection live (too large). Narrow the filter to use spend-based options.';
+    if (s === 'error') return 'The Estimated APC spend panel could not price this selection, so spend-based options are unavailable.';
+    return 'Estimated APC spend figures are not available (precompute missing).';
+  })();
+
+  // Derive plotted points for the active x-axis mode.
+  const view = React.useMemo(() => {
+    if (data.status !== 'ready') return null;
+    const pubs = data.pubs || [];
+    const pts = [];
+    const unmatched = [];
+    let apcIndex = null;
+    if (modeDef.needsApc && apcReady) {
+      apcIndex = new Map();
+      for (const r of apcShared.rows || []) apcIndex.set(apcNormPub(r.key), r);
+    }
+    for (const p of pubs) {
+      let x = null, y = p.meanCitesAll, size = p.totalWorks || p.nSampled, field = p.domAll, extra = {};
+      if (xMode === 'meanDoaj') {
+        if (p.nKnown < 5) continue;
+        x = p.meanApc; y = p.meanCitesKnown; size = p.nKnown; field = p.domKnown;
+      } else if (xMode === 'coverage') {
+        x = (p.nKnown / p.nSampled) * 100;
+      } else if (xMode === 'totalWorks') {
+        x = p.totalWorks;
+      } else {
+        if (!apcIndex) continue;
+        const r = apcIndex.get(apcNormPub(p.label));
+        if (!r) { unmatched.push(p.label); continue; }
+        extra = { spend: r.usd, priced: r.priced };
+        if (xMode === 'totalSpend') x = r.usd;
+        else if (xMode === 'meanPriced') x = r.priced > 0 ? r.usd / r.priced : null;
+        else if (xMode === 'hybridShare') {
+          const denom = (r.gold || 0) + (r.hybrid || 0);
+          x = denom > 0 ? (100 * (r.hybrid || 0)) / denom : null;
+        }
+      }
+      if (x == null || Number.isNaN(x)) continue;
+      if (modeDef.scale === 'log' && x <= 0) continue;
+      pts.push({ key: p.key, label: p.label, x, y, size: Math.max(1, size), field, nSampled: p.nSampled, nKnown: p.nKnown, totalWorks: p.totalWorks, ...extra });
+    }
+    // Legend: top 6 fields among the plotted points.
+    const fc = new Map();
+    for (const p of pts) fc.set(p.field, (fc.get(p.field) || 0) + 1);
+    const topFields = [...fc.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([f]) => f);
+    const FIELD_PALETTE = [PALETTE.navy, PALETTE.burgundy, PALETTE.forest, PALETTE.gold, PALETTE.teal, PALETTE.plum];
+    const fieldColorMap = new Map();
+    topFields.forEach((f, i) => fieldColorMap.set(f, FIELD_PALETTE[i]));
+    return { pts, unmatched, fields: topFields.map((f) => ({ label: f, color: fieldColorMap.get(f) })), fieldColorMap };
+  }, [data, xMode, apcShared, apcReady]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const Scatter = ({ points, fieldColorMap, otherColor }) => {
     const [hover, setHover] = React.useState(null);
     const W = 780, H = 420;
@@ -3854,35 +3940,41 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
     if (!points || points.length === 0) {
       return (
         <div className="flex h-[420px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
-          No publishers with enough APC-known works to plot.
+          No publishers to plot for this x-axis.
         </div>
       );
     }
 
-    const maxApc = Math.max(1, ...points.map((p) => p.meanApc));
-    const maxCites = Math.max(1, ...points.map((p) => p.meanCites));
-    const maxN = Math.max(1, ...points.map((p) => p.nWorks));
-
-    // Nice-round axis maxima
     const niceMax = (v) => {
       const mag = Math.pow(10, Math.floor(Math.log10(Math.max(1, v))));
       return Math.ceil(v / mag) * mag;
     };
-    const xMax = niceMax(maxApc);
-    const yMax = niceMax(maxCites);
+    const maxY = Math.max(1, ...points.map((p) => p.y));
+    const yMax = niceMax(maxY);
+    const maxSize = Math.max(1, ...points.map((p) => p.size));
 
-    const xFor = (v) => PAD.left + (v / xMax) * plotW;
+    let xFor, xTicks;
+    if (modeDef.scale === 'log') {
+      const xs = points.map((p) => p.x);
+      let lo = Math.pow(10, Math.floor(Math.log10(Math.min(...xs))));
+      let hi = Math.pow(10, Math.ceil(Math.log10(Math.max(...xs))));
+      if (hi <= lo) hi = lo * 10;
+      const L0 = Math.log10(lo), L1 = Math.log10(hi);
+      xFor = (v) => PAD.left + ((Math.log10(v) - L0) / (L1 - L0)) * plotW;
+      xTicks = [];
+      for (let e = L0; e <= L1 + 1e-9; e++) xTicks.push(Math.pow(10, e));
+    } else {
+      const xMax = modeDef.fixedMax || niceMax(Math.max(1, ...points.map((p) => p.x)));
+      xFor = (v) => PAD.left + (v / xMax) * plotW;
+      xTicks = [0, xMax / 4, xMax / 2, (3 * xMax) / 4, xMax];
+    }
     const yFor = (v) => PAD.top + plotH - (v / yMax) * plotH;
-    const rFor = (n) => 4 + Math.sqrt(n / maxN) * 16;
-
-    // Axis ticks
-    const xTicks = [0, xMax / 4, xMax / 2, (3 * xMax) / 4, xMax];
+    const rFor = (n) => 4 + Math.sqrt(n / maxSize) * 16;
     const yTicks = [0, yMax / 4, yMax / 2, (3 * yMax) / 4, yMax];
 
     return (
       <div className="relative" style={{ width: '100%' }}>
         <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
-          {/* Grid + axes */}
           {yTicks.map((t) => (
             <g key={`yt-${t}`}>
               <line x1={PAD.left} x2={W - PAD.right} y1={yFor(t)} y2={yFor(t)} stroke={PALETTE.rule} strokeDasharray="2 4" />
@@ -3895,17 +3987,12 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
             <g key={`xt-${t}`}>
               <line x1={xFor(t)} x2={xFor(t)} y1={PAD.top} y2={H - PAD.bottom} stroke={PALETTE.rule} strokeDasharray="2 4" opacity="0.5" />
               <text x={xFor(t)} y={H - PAD.bottom + 14} textAnchor="middle" style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}>
-                ${t >= 1000 ? `${(t / 1000).toFixed(t < 10000 ? 1 : 0)}K` : t.toFixed(0)}
+                {apcFmtX(t, modeDef.fmt)}
               </text>
             </g>
           ))}
-          {/* Axis labels */}
-          <text
-            x={PAD.left + plotW / 2} y={H - 6}
-            textAnchor="middle"
-            style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
-          >
-            MEAN APC LIST (USD, DOAJ)
+          <text x={PAD.left + plotW / 2} y={H - 6} textAnchor="middle" style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}>
+            {modeDef.axis}
           </text>
           <text
             x={14} y={PAD.top + plotH / 2}
@@ -3915,16 +4002,15 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
           >
             MEAN CITES PER WORK
           </text>
-          {/* Points, sorted so hovered rises to top */}
           {points.map((p) => {
             const isHovered = hover && hover.key === p.key;
-            const color = fieldColorMap.get(p.dominantField) || otherColor;
+            const color = fieldColorMap.get(p.field) || otherColor;
             return (
               <circle
                 key={p.key}
-                cx={xFor(p.meanApc)}
-                cy={yFor(p.meanCites)}
-                r={rFor(p.nWorks)}
+                cx={xFor(p.x)}
+                cy={yFor(p.y)}
+                r={rFor(p.size)}
                 fill={color}
                 fillOpacity={isHovered ? 0.85 : (hover ? 0.28 : 0.55)}
                 stroke={isHovered ? PALETTE.ink : color}
@@ -3940,22 +4026,18 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
           <div
             className="pointer-events-none absolute rounded-sm px-3 py-2"
             style={{
-              background: PALETTE.ink,
-              color: PALETTE.cream,
-              fontFamily: FONT_BODY,
-              fontSize: 11.5,
-              lineHeight: 1.5,
-              border: `1px solid ${PALETTE.ink}`,
-              boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
-              top: 8, right: 8, maxWidth: 320,
+              background: PALETTE.ink, color: PALETTE.cream, fontFamily: FONT_BODY, fontSize: 11.5, lineHeight: 1.5,
+              border: `1px solid ${PALETTE.ink}`, boxShadow: '0 4px 12px rgba(0,0,0,0.18)', top: 8, right: 8, maxWidth: 320,
             }}
           >
             <div style={{ fontWeight: 600, marginBottom: 3 }}>{hover.label}</div>
             <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, opacity: 0.9 }}>
-              Mean APC: ${fmtFull(Math.round(hover.meanApc))}<br />
-              Mean cites/work: {hover.meanCites.toFixed(1)}<br />
-              N works with known APC: {hover.nWorks} of {hover.nSampled} sampled<br />
-              Dominant field: {hover.dominantField}
+              {modeDef.label}: {apcFmtX(hover.x, modeDef.fmt)}<br />
+              Mean cites/work: {hover.y.toFixed(1)}<br />
+              {hover.spend != null && <>Estimated spend: {apcFmtX(hover.spend, 'usd')} over {fmtFull(hover.priced)} priced works<br /></>}
+              Works in selection: {fmtFull(hover.totalWorks)}<br />
+              Sampled: {hover.nSampled} ({hover.nKnown} with DOAJ APC)<br />
+              Dominant field: {hover.field}
             </div>
           </div>
         )}
@@ -3968,20 +4050,19 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
       <SectionTitle
         icon={TrendingUp}
         kicker="APC vs citation impact"
-        title="Do higher-APC publishers deliver more citations?"
+        title="Do publishers that cost more deliver more citations?"
         hint="Publisher-level scatter; each dot is one publisher"
       />
       <p
         className="-mt-2 mb-4 max-w-4xl"
         style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
       >
-        Each dot is one publisher in the top 30 for {countryName(country)}'s current selection. The x position is that publisher's
-        mean APC list price (USD, sourced from DOAJ); the y position is mean citations per work. Dot size scales with the
-        number of qualifying works; dot colour marks the publisher's most common field. A rightward-and-upward drift
-        would suggest higher-APC publishers get more citations, but read it with care: the pattern is heavily confounded
-        by venue prestige (a Nature-tier publisher sits top-right regardless of causal APC effect) and by field
-        (biomedical publishers cluster differently from humanities). The field colouring makes the between-field
-        component visible so it doesn't get mistaken for a within-field trend.
+        Each dot is one publisher in the top 30 for {countryName(country)}'s current selection. The y position is mean
+        citations per work from a random sample of up to 100 works; the x-axis can be switched between price, spend,
+        volume, and coverage measures. Dot size scales with works; dot colour marks the publisher's most common field.
+        Read any pattern with care: it is confounded by venue prestige (a Nature-tier publisher sits high regardless of
+        what it charges) and by field (biomedical publishers cluster differently from the humanities). The field colouring
+        makes the between-field component visible so it isn't mistaken for a within-field trend.
       </p>
 
       {data.status === 'idle' && (
@@ -3992,20 +4073,13 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
           <button
             onClick={load}
             className="rounded-sm px-4 py-2"
-            style={{
-              background: PALETTE.ink,
-              color: PALETTE.cream,
-              fontFamily: FONT_MONO,
-              fontSize: 12,
-              letterSpacing: '0.04em',
-              border: `1px solid ${PALETTE.ink}`,
-            }}
+            style={{ background: PALETTE.ink, color: PALETTE.cream, fontFamily: FONT_MONO, fontSize: 12, letterSpacing: '0.04em', border: `1px solid ${PALETTE.ink}` }}
             disabled={topPublishers.length === 0}
           >
             {topPublishers.length === 0 ? 'Waiting for publisher list…' : 'Load APC vs citation analysis'}
           </button>
           <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, marginTop: 10 }}>
-            Fires up to {Math.min(30, topPublishers.length)} API calls (one per publisher).
+            Fires up to {Math.min(30, topPublishers.length)} API calls (one per publisher). Switching the x-axis afterwards costs nothing.
           </div>
         </div>
       )}
@@ -4025,25 +4099,71 @@ const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [], open, 
         </div>
       )}
 
-      {data.status === 'ready' && (
+      {data.status === 'ready' && view && (
         <>
-          <Scatter points={data.points} fieldColorMap={data.fieldColorMap} otherColor={data.otherColor} />
-          {/* Legend + qualification note */}
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
-            {data.fields.map((f) => (
-              <div key={f.label} className="flex items-center gap-1.5">
-                <span style={{ width: 10, height: 10, borderRadius: '50%', background: f.color, display: 'inline-block' }} />
-                <span style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.charcoal }}>{f.label}</span>
-              </div>
-            ))}
-            <div className="flex items-center gap-1.5">
-              <span style={{ width: 10, height: 10, borderRadius: '50%', background: data.otherColor, display: 'inline-block' }} />
-              <span style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted }}>Other</span>
+          {/* X-axis selector */}
+          <div className="mb-2 flex flex-wrap items-center gap-1">
+            <span className="mr-1" style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.14em', color: PALETTE.muted }}>X-AXIS</span>
+            {APC_X_MODES.map((m) => {
+              const active = xMode === m.key;
+              const unavailable = m.needsApc && !apcReady;
+              return (
+                <button
+                  key={m.key}
+                  onClick={() => setXMode(m.key)}
+                  className="rounded-sm px-2.5 py-1 transition-colors"
+                  title={unavailable ? apcUnavailableMsg : m.axis}
+                  style={{
+                    border: `1px solid ${active ? PALETTE.ink : PALETTE.rule}`,
+                    background: active ? PALETTE.ink : 'transparent',
+                    color: active ? PALETTE.cream : (unavailable ? PALETTE.muted : PALETTE.charcoal),
+                    fontFamily: FONT_MONO, fontSize: 11, letterSpacing: '0.03em',
+                    opacity: unavailable && !active ? 0.6 : 1,
+                  }}
+                >
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+          <p className="mb-3 max-w-4xl" style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.charcoal, lineHeight: 1.5 }}>
+            {APC_X_NOTES[xMode]}
+            {modeDef.needsApc && apcReady && (
+              <span style={{ color: PALETTE.muted }}>
+                {' '}Using {apcShared.source === 'live' ? 'live figures for the current selection' : 'national precomputed figures'}.
+              </span>
+            )}
+          </p>
+
+          {modeDef.needsApc && !apcReady ? (
+            <div className="rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px dashed ${PALETTE.rule}`, fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+              {apcUnavailableMsg}
             </div>
-          </div>
-          <div className="mt-3" style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.06em' }}>
-            {data.points.length} of {data.totalPublishersConsidered} publishers plotted · minimum 5 works with known APC per publisher · publishers with all-null APC (typical of hybrid or non-DOAJ venues) are excluded · Diamond OA publishers sit at $0 by design
-          </div>
+          ) : (
+            <>
+              <Scatter points={view.pts} fieldColorMap={view.fieldColorMap} otherColor={PALETTE.muted} />
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                {view.fields.map((f) => (
+                  <div key={f.label} className="flex items-center gap-1.5">
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: f.color, display: 'inline-block' }} />
+                    <span style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.charcoal }}>{f.label}</span>
+                  </div>
+                ))}
+                <div className="flex items-center gap-1.5">
+                  <span style={{ width: 10, height: 10, borderRadius: '50%', background: PALETTE.muted, display: 'inline-block' }} />
+                  <span style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted }}>Other</span>
+                </div>
+              </div>
+              <div className="mt-3" style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.06em', lineHeight: 1.6 }}>
+                {view.pts.length} of {data.totalPublishersConsidered} publishers plotted
+                {xMode === 'meanDoaj' && ' · minimum 5 sampled works with a DOAJ APC · Diamond OA publishers sit at $0 by design'}
+                {modeDef.needsApc && ` · ${view.unmatched.length} not found in the spend panel (no estimated spend, or a name mismatch)`}
+                {modeDef.needsApc && view.unmatched.length > 0 && (
+                  <div>Not found: {view.unmatched.slice(0, 8).join('; ')}{view.unmatched.length > 8 ? '; …' : ''}</div>
+                )}
+              </div>
+            </>
+          )}
         </>
       )}
     </Card>
@@ -4636,6 +4756,10 @@ export default function ResearchOutputDashboard() {
   // not offered because OpenAlex does not expose author_position as a
   // top-level filter.
   const [authorRole, setAuthorRole] = useState('any');
+
+  // Per-publisher APC spend figures published by ApcPanel, consumed by the
+  // APC vs citation impact section's spend-based x-axis options.
+  const [apcShared, setApcShared] = useState({ status: 'idle' });
 
   // Persist country and clear filters when it changes (institution/publisher/funder
   // IDs from one country don't apply once the corpus shifts to another).
@@ -6087,6 +6211,7 @@ export default function ResearchOutputDashboard() {
                 : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
             }
             {...bindCard('apc')}
+            onData={setApcShared}
           />
         </div>
         </CollapsibleSection>
@@ -6286,6 +6411,7 @@ export default function ResearchOutputDashboard() {
             country={country}
             baseFilterStr={filterStrings.all}
             topPublishers={state.publishers?.data || []}
+            apcShared={apcShared}
             {...bindCard('apcCitation')}
           />
 
