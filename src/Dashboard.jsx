@@ -2109,6 +2109,335 @@ const RankBumpChart = ({ rows, years, topN = 15, status, accentColor }) => {
 };
 
 
+// Estimated APC spend section. Uses OpenAlex's documented `group_by=apc_sum`
+// recipe to estimate how much the country's researchers have paid in article
+// processing charges, and breaks the total down by publisher.
+//
+// The recipe follows OpenAlex's help center methodology
+// (help.openalex.org/hc/en-us/articles/24942051299095):
+//
+//   /works?filter=corresponding_institution_ids:<country_roster>,
+//                 type:types/article|types/review,
+//                 primary_location.source.type:source-types/journal,
+//                 <base_filter_excluding_country_and_authorRole>
+//         &group_by=apc_sum
+//
+// Reasoning behind the fixed filter parts:
+//   - corresponding_institution_ids  → APC is typically paid by the corresponding
+//                                       author's institution; this is the closest
+//                                       OpenAlex proxy for who wrote the cheque.
+//   - type:types/article|types/review → editorials, letters, and paratext don't
+//                                       usually carry an APC.
+//   - primary_location.source.type:source-types/journal → conference proceedings
+//                                       and book chapters don't usually carry an
+//                                       APC either.
+//
+// Coverage caveats (surfaced in the section prose):
+//   - APC list price comes from DOAJ. Journals not indexed in DOAJ have null
+//     APC, and the sum excludes them (undercount).
+//   - Multiple corresponding institutions on one work cause double-counting in
+//     the per-institution flavour; we're aggregating at country level so this
+//     nets out, but the per-publisher breakdown may still double-count.
+//   - "Estimated," not audited. Read as an order-of-magnitude budget signal,
+//     not a precise financial figure.
+//
+// API cost:
+//   - 1 call for total spend
+//   - 1 call per top-N publisher for the publisher breakdown (capped at 20)
+//   So up to 21 lazy calls per section load.
+const ApcSpendSection = ({ country, baseFilterStr, topPublishers = [], countryInstitutionIds = [] }) => {
+  const [data, setData] = React.useState({ status: 'idle' });
+  const [cachedFor, setCachedFor] = React.useState(null);
+
+  const publisherKey = topPublishers.slice(0, 20).map((p) => p.key).join(',');
+  const rosterKey = countryInstitutionIds.slice(0, 100).join(',');
+
+  // Build the filter used by the OpenAlex recipe. We start from the current
+  // dashboard base filter (which carries publication_year and the active
+  // chip filters) but strip out anything that conflicts with the recipe:
+  //   - remove any existing corresponding_institution_ids clause (the base
+  //     filter's authorRole toggle may have added one; we're overriding here)
+  //   - remove any existing type: clause (from a docTypes chip); the recipe
+  //     hard-codes article|review
+  //   - remove any existing primary_location.source.type clause
+  //   - remove country_code clause (redundant given the corresponding roster)
+  const recipeFilter = React.useMemo(() => {
+    if (!baseFilterStr) return null;
+    const roster = countryInstitutionIds
+      .slice(0, 100)
+      .map((id) => normalizeFilterValue(id))
+      .join('|');
+    if (!roster) return null;
+    const stripKeys = [
+      'corresponding_institution_ids',
+      'type',
+      'primary_location.source.type',
+      'authorships.institutions.country_code',
+    ];
+    const parts = baseFilterStr
+      .split(',')
+      .filter((clause) => !stripKeys.some((k) => clause.startsWith(`${k}:`)));
+    parts.push(`corresponding_institution_ids:${roster}`);
+    parts.push('type:types/article|types/review');
+    parts.push('primary_location.source.type:source-types/journal');
+    return parts.join(',');
+  }, [baseFilterStr, rosterKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const load = React.useCallback(() => {
+    if (!recipeFilter) return;
+    setData({ status: 'loading' });
+    const sig = `${recipeFilter}::${publisherKey}`;
+    setCachedFor(sig);
+    let cancelled = false;
+
+    // Call 1: overall APC sum via group_by=apc_sum. Returns a single bucket
+    // whose count is total spend USD (per OpenAlex's recipe docs) and whose
+    // work count reflects the filter denominator.
+    const totalUrl = withMailto(
+      `${OPENALEX_BASE}/works?filter=${recipeFilter}&group_by=apc_sum`
+    );
+
+    // Calls 2..N: per-publisher APC sum. For each of the top publishers, we
+    // add primary_location.source.host_organization:<id> to the recipe and
+    // group_by=apc_sum again. Small enough to run in parallel.
+    const publishers = topPublishers.slice(0, 20);
+    const perPubUrls = publishers.map((p) => {
+      const idNorm = normalizeFilterValue(p.key);
+      return {
+        pub: p,
+        url: withMailto(
+          `${OPENALEX_BASE}/works?filter=${recipeFilter},primary_location.source.host_organization:${idNorm}&group_by=apc_sum`
+        ),
+      };
+    });
+
+    // OpenAlex's group_by=apc_sum returns a single-item group_by array where
+    // the "key" is the sum in USD and the "count" is the number of works.
+    // (Their recipe shows this in the example response.) We parse defensively.
+    const parseApcSum = (json) => {
+      const g = json?.group_by?.[0];
+      if (!g) return { sum: 0, works: 0 };
+      // The key is a stringified integer sum in USD; the count is the work count.
+      const sum = Number(g.key) || 0;
+      const works = Number(g.count) || 0;
+      return { sum, works };
+    };
+
+    const totalPromise = fetchJson(totalUrl).catch((e) => ({ __err: e.message }));
+    const perPubPromise = Promise.all(
+      perPubUrls.map(({ pub, url }) =>
+        fetchJson(url)
+          .then((j) => ({ pub, ...parseApcSum(j) }))
+          .catch(() => ({ pub, sum: 0, works: 0, __err: true }))
+      )
+    );
+
+    Promise.all([totalPromise, perPubPromise]).then(([totalJson, perPub]) => {
+      if (cancelled) return;
+      if (totalJson?.__err) {
+        setData({ status: 'error', error: totalJson.__err });
+        return;
+      }
+      const { sum: totalSum, works: totalWorks } = parseApcSum(totalJson);
+
+      const perPubRanked = perPub
+        .filter((p) => !p.__err && p.sum > 0)
+        .sort((a, b) => b.sum - a.sum);
+
+      setData({
+        status: 'ready',
+        totalSum,
+        totalWorks,
+        meanPerWork: totalWorks > 0 ? totalSum / totalWorks : 0,
+        perPubRanked,
+        totalPublishersConsidered: publishers.length,
+      });
+    }).catch((err) => {
+      if (cancelled) return;
+      setData({ status: 'error', error: err.message });
+    });
+
+    return () => { cancelled = true; };
+  }, [recipeFilter, publisherKey, topPublishers]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  React.useEffect(() => {
+    if (!recipeFilter) return;
+    const sig = `${recipeFilter}::${publisherKey}`;
+    if (cachedFor !== null && cachedFor !== sig) {
+      setData({ status: 'idle' });
+      setCachedFor(null);
+    }
+  }, [recipeFilter, publisherKey, cachedFor]);
+
+  const formatUSD = (n) => {
+    if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+    if (n >= 10_000) return `$${(n / 1000).toFixed(0)}K`;
+    if (n >= 1000) return `$${(n / 1000).toFixed(1)}K`;
+    return `$${Math.round(n).toLocaleString()}`;
+  };
+
+  return (
+    <Card className="p-5 lg:col-span-12">
+      <SectionTitle
+        icon={Banknote}
+        kicker="Estimated APC spend"
+        title={`APC costs paid by ${countryName(country)} corresponding institutions`}
+        hint="OpenAlex group_by=apc_sum recipe · articles and reviews in journals only"
+      />
+      <p
+        className="-mt-2 mb-4 max-w-4xl"
+        style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
+      >
+        This section applies OpenAlex's{' '}
+        <a
+          href="https://help.openalex.org/hc/en-us/articles/24942051299095"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: PALETTE.ink, textDecoration: 'underline' }}
+        >official recipe</a>{' '}
+        for estimating institutional APC spend: filter to articles and reviews in journals where a {countryName(country)} institution is the corresponding-author institution, then sum{' '}
+        <code style={{ fontFamily: FONT_MONO, fontSize: 11 }}>apc_paid</code>. Read the numbers as an <strong>order-of-magnitude estimate</strong>, not an audited financial figure. Undercount factors: journals not indexed in DOAJ have no APC in OpenAlex and are excluded from the sum; works with missing corresponding-institution metadata (about 60% of journal articles globally) are also excluded. Overcount factors: works with multiple corresponding institutions are attributed to each of them, and the per-publisher breakdown can inflate publishers whose {countryName(country)} authors also co-published with other-country corresponding authors.
+      </p>
+
+      {data.status === 'idle' && (
+        <div className="rounded-sm px-4 py-6 text-center" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, marginBottom: 12 }}>
+            This section loads on demand.
+          </div>
+          <button
+            onClick={load}
+            className="rounded-sm px-4 py-2"
+            style={{
+              background: PALETTE.ink,
+              color: PALETTE.cream,
+              fontFamily: FONT_MONO,
+              fontSize: 12,
+              letterSpacing: '0.04em',
+              border: `1px solid ${PALETTE.ink}`,
+            }}
+            disabled={!recipeFilter || topPublishers.length === 0}
+          >
+            {!recipeFilter || topPublishers.length === 0
+              ? 'Waiting for institution roster and publisher list…'
+              : 'Load estimated APC spend'}
+          </button>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, marginTop: 10 }}>
+            Fires 1 + {Math.min(20, topPublishers.length)} API calls.
+          </div>
+        </div>
+      )}
+
+      {data.status === 'loading' && (
+        <div className="flex items-center gap-2 rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <Loader2 size={14} className="animate-spin" />
+          <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+            Applying OpenAlex apc_sum recipe, summing per publisher…
+          </span>
+        </div>
+      )}
+
+      {data.status === 'error' && (
+        <div className="rounded-sm px-4 py-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}`, color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
+          Could not load: {data.error}. <button onClick={load} style={{ textDecoration: 'underline', color: PALETTE.ink, fontFamily: FONT_MONO, fontSize: 12 }}>Retry</button>
+        </div>
+      )}
+
+      {data.status === 'ready' && (
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-12">
+          {/* Left: three stat cards stacked */}
+          <div className="md:col-span-4 flex flex-col gap-3">
+            <div className="rounded-sm px-4 py-3" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.muted, letterSpacing: '0.14em' }} className="uppercase">
+                Total estimated APC
+              </div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 32, fontWeight: 500, fontStyle: 'italic', color: PALETTE.ink, lineHeight: 1.1 }} className="mt-0.5">
+                {formatUSD(data.totalSum)}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }}>
+                across {fmtFull(data.totalWorks)} qualifying works
+              </div>
+            </div>
+            <div className="rounded-sm px-4 py-3" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.muted, letterSpacing: '0.14em' }} className="uppercase">
+                Mean APC per work
+              </div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 24, fontWeight: 500, fontStyle: 'italic', color: PALETTE.gold, lineHeight: 1.1 }} className="mt-0.5">
+                {formatUSD(data.meanPerWork)}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }}>
+                over qualifying works
+              </div>
+            </div>
+            <div className="rounded-sm px-4 py-3" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: PALETTE.muted, letterSpacing: '0.14em' }} className="uppercase">
+                Publishers with spend
+              </div>
+              <div style={{ fontFamily: FONT_DISPLAY, fontSize: 24, fontWeight: 500, fontStyle: 'italic', color: PALETTE.charcoal, lineHeight: 1.1 }} className="mt-0.5">
+                {data.perPubRanked.length}
+              </div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, color: PALETTE.muted }}>
+                of {data.totalPublishersConsidered} top publishers
+              </div>
+            </div>
+          </div>
+
+          {/* Right: ranked bar list by publisher spend */}
+          <div className="md:col-span-8">
+            <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.18em' }} className="uppercase mb-2">
+              Spend by publisher · top {data.perPubRanked.length}
+            </div>
+            {data.perPubRanked.length === 0 ? (
+              <div style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.muted }} className="px-3 py-6">
+                No publisher-level APC spend detected in the top publishers. This is typical when the top publishers are hybrid or non-DOAJ (no list price on record).
+              </div>
+            ) : (
+              <ol className="space-y-1.5">
+                {data.perPubRanked.map((p, i) => {
+                  const maxSum = data.perPubRanked[0].sum;
+                  const widthPct = (p.sum / maxSum) * 100;
+                  const share = data.totalSum > 0 ? (p.sum / data.totalSum) * 100 : 0;
+                  return (
+                    <li key={p.pub.key} className="grid items-center gap-2" style={{ gridTemplateColumns: '20px 1fr 110px' }}>
+                      <span style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, textAlign: 'right' }}>{i + 1}</span>
+                      <div className="relative" style={{ height: 24, background: PALETTE.cream, borderRadius: 2 }}>
+                        <div
+                          style={{
+                            position: 'absolute', left: 0, top: 0, bottom: 0,
+                            width: `${Math.max(widthPct, 2)}%`,
+                            background: PALETTE.gold,
+                            opacity: 0.24,
+                            borderRadius: 2,
+                          }}
+                        />
+                        <span
+                          className="absolute inset-y-0 left-2 right-2 flex items-center"
+                          style={{ fontFamily: FONT_BODY, fontSize: 12, color: PALETTE.ink, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}
+                          title={p.pub.label || p.pub.key}
+                        >
+                          {p.pub.label || p.pub.key}
+                        </span>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: PALETTE.ink, fontWeight: 500 }}>
+                          {formatUSD(p.sum)}
+                        </div>
+                        <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted }}>
+                          {share.toFixed(1)}% · {fmtFull(p.works)} works
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+};
+
+
 // APC vs citation impact section. Publisher-level scatter that plots each
 // publisher's mean article-processing charge (list price, USD) against its
 // mean citations per work. Dot size scales with the number of qualifying
@@ -4996,6 +5325,13 @@ export default function ResearchOutputDashboard() {
               </>
             )}
           </Card>
+
+          <ApcSpendSection
+            country={country}
+            baseFilterStr={filterStrings.all}
+            topPublishers={state.publishers?.data || []}
+            countryInstitutionIds={(state.institutions?.data || []).map((d) => d.key)}
+          />
 
           <ApcCitationSection
             country={country}
