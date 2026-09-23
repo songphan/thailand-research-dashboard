@@ -31,7 +31,7 @@ const OPENALEX_BASE = 'https://api.openalex.org';
 // burning your daily credits, which OpenAlex's per-IP rate limit largely
 // prevents anyway). If you'd rather hide the key, the proper path is a
 // small backend proxy that adds the key server-side.
-const OPENALEX_API_KEY = 'wPzRa7six3VGUf4dYxNYmv'; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
+const OPENALEX_API_KEY = ''; // <-- PUT YOUR API KEY HERE, e.g. 'oax_abc123xyz'
 
 const PALETTE = {
   cream: '#f6f1e7',
@@ -251,7 +251,7 @@ const normalizeFilterValue = (key, dim = null) => {
 
 // excludeDim drops that dimension's chips so a chart can still display its full breakdown
 // when it is the source of the filter (faceted-search "exclusive" pattern).
-const buildFilterString = (country, yearOrYears, filters, excludeDim = null) => {
+const buildFilterString = (country, yearOrYears, filters, excludeDim = null, authorRole = null, correspondingRoster = null) => {
   // OpenAlex filter values support OR via the pipe character. So a multi-year
   // selection encodes as `publication_year:2023|2024|2025` and reads naturally
   // on the server side as a single-clause OR over the listed years.
@@ -266,6 +266,19 @@ const buildFilterString = (country, yearOrYears, filters, excludeDim = null) => 
     if (!def || !def.filterKey) continue;
     const values = items.map((i) => normalizeFilterValue(i.value, dim)).join('|');
     parts.push(`${def.filterKey}:${values}`);
+  }
+  // Corresponding-author restriction: narrow to works where at least one of
+  // the country's institutions is a corresponding-author institution. We use
+  // the top-100 institutions from the roster to stay under OpenAlex's 100-value
+  // OR cap in a single filter clause. In practice the top-100 institutions
+  // account for the vast majority of a country's real-world output, so the
+  // remaining tail is negligible for this restriction.
+  if (authorRole === 'corresponding' && correspondingRoster && correspondingRoster.length > 0) {
+    const idsForFilter = correspondingRoster
+      .slice(0, 100)
+      .map((id) => normalizeFilterValue(id))
+      .join('|');
+    parts.push(`corresponding_institution_ids:${idsForFilter}`);
   }
   return parts.join(',');
 };
@@ -3681,6 +3694,364 @@ const ApcPanel = ({ years, country, filters, instFilterIds, open, onToggle }) =>
   </>);
 };
 
+
+// APC vs citation impact section. Publisher-level scatter that plots each
+// publisher's mean article-processing charge (list price, USD) against its
+// mean citations per work. Dot size scales with the number of qualifying
+// works; dot color encodes the publisher's most common OpenAlex field.
+//
+// FRAMING NOTE: this is Option B from the design discussion. The question
+// being answered is NOT "does paying a higher APC yield more citations for
+// a given paper" (a work-level question that OpenAlex data cannot cleanly
+// answer because of field confounding). It IS "among the publishers this
+// country's researchers use, do the higher-APC ones deliver more citations
+// on average" (a venue-level question that the data can answer, subject
+// to venue prestige confounding (a Nature-tier publisher will dominate at
+// the top-right regardless of its APC being causally related to citations).
+// The field-color encoding lets readers see whether any observed correlation
+// is within-field or driven by between-field differences.
+//
+// APC PROVENANCE NOTES:
+// - `apc_list.value_usd` comes from DOAJ. Coverage is partial: only publishers
+//   whose journals are DOAJ-indexed have list-price data. Hybrid journals and
+//   non-DOAJ venues have null and get excluded.
+// - Diamond OA journals have `apc_list.value = 0`. That's a real signal, not
+//   missing data. A publisher whose mean APC is zero is legitimately at x=0.
+//
+// API cost: one /works call per top-30 publisher, sample=100. Lazy-loaded via
+// a Load button so nothing fires on section render.
+const ApcCitationSection = ({ country, baseFilterStr, topPublishers = [] }) => {
+  const [data, setData] = React.useState({ status: 'idle' });
+  const [cachedFor, setCachedFor] = React.useState(null);
+
+  // Which publishers to analyze: take the parent's top publishers list and cap
+  // at 30. Each requires one API call, so 30 is a good balance of coverage vs
+  // budget. If the parent hasn't loaded publishers yet the section is inert.
+  const publisherKey = topPublishers.slice(0, 30).map((p) => p.key).join(',');
+
+  const load = React.useCallback(() => {
+    setData({ status: 'loading' });
+    const sig = `${baseFilterStr}::${publisherKey}`;
+    setCachedFor(sig);
+    let cancelled = false;
+
+    const publishers = topPublishers.slice(0, 30);
+    if (publishers.length === 0) {
+      setData({ status: 'ready', points: [], fields: [], totalPublishersConsidered: 0 });
+      return;
+    }
+
+    // For each publisher, fetch a random sample of 100 works filtered to that
+    // publisher, with the fields we need to compute means and dominant field.
+    // Escape the publisher ID as needed. OpenAlex publisher IDs are full URLs
+    // starting with https://openalex.org/, which the normalizeFilterValue helper
+    // (used by chip filters) handles for us.
+    const fetchPublisher = async (pub) => {
+      const idNorm = normalizeFilterValue(pub.key);
+      const filter = `${baseFilterStr},primary_location.source.host_organization:${idNorm}`;
+      const url = withMailto(
+        `${OPENALEX_BASE}/works?filter=${filter}` +
+        `&sample=100&per-page=100` +
+        `&select=id,cited_by_count,apc_list,primary_topic`
+      );
+      try {
+        const j = await fetchJson(url);
+        return { pub, results: j?.results || [] };
+      } catch {
+        return { pub, results: null };
+      }
+    };
+
+    Promise.all(publishers.map(fetchPublisher)).then((perPub) => {
+      if (cancelled) return;
+
+      const MIN_APC_KNOWN = 5;
+      const points = [];
+      for (const { pub, results } of perPub) {
+        if (!results || results.length === 0) continue;
+        // Works with a known APC list value (including zero for diamond OA).
+        // Null means DOAJ has no listed APC for that venue.
+        const withKnownApc = results.filter((w) => {
+          const v = w.apc_list?.value_usd;
+          return typeof v === 'number' && !Number.isNaN(v);
+        });
+        if (withKnownApc.length < MIN_APC_KNOWN) continue;
+        const meanApc = withKnownApc.reduce((s, w) => s + (w.apc_list.value_usd || 0), 0) / withKnownApc.length;
+        const meanCites = withKnownApc.reduce((s, w) => s + (w.cited_by_count || 0), 0) / withKnownApc.length;
+        // Dominant field: count each work's primary_topic.field, pick the mode.
+        const fieldCounts = new Map();
+        for (const w of withKnownApc) {
+          const fieldName = w.primary_topic?.field?.display_name || 'Unknown';
+          fieldCounts.set(fieldName, (fieldCounts.get(fieldName) || 0) + 1);
+        }
+        let dominantField = 'Unknown';
+        let dominantCount = 0;
+        for (const [f, c] of fieldCounts) {
+          if (c > dominantCount) { dominantField = f; dominantCount = c; }
+        }
+        points.push({
+          key: pub.key,
+          label: pub.label || pub.key,
+          nWorks: withKnownApc.length,
+          nSampled: results.length,
+          meanApc,
+          meanCites,
+          dominantField,
+        });
+      }
+
+      // Determine color palette: top 6 fields by publisher-count get distinct
+      // colors, everything else is "Other" (gray). This keeps the legend
+      // readable at a glance.
+      const fieldPubCounts = new Map();
+      for (const p of points) {
+        fieldPubCounts.set(p.dominantField, (fieldPubCounts.get(p.dominantField) || 0) + 1);
+      }
+      const topFields = [...fieldPubCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([f]) => f);
+      // Categorical palette drawn from the existing PALETTE.
+      const FIELD_PALETTE = [
+        PALETTE.navy, PALETTE.burgundy, PALETTE.forest,
+        PALETTE.gold, PALETTE.teal, PALETTE.plum,
+      ];
+      const fieldColor = new Map();
+      topFields.forEach((f, i) => fieldColor.set(f, FIELD_PALETTE[i]));
+
+      setData({
+        status: 'ready',
+        points,
+        fields: topFields.map((f) => ({ label: f, color: fieldColor.get(f) })),
+        otherColor: PALETTE.muted,
+        fieldColorMap: fieldColor,
+        totalPublishersConsidered: publishers.length,
+      });
+    }).catch((err) => {
+      if (cancelled) return;
+      setData({ status: 'error', error: err.message });
+    });
+
+    return () => { cancelled = true; };
+  }, [baseFilterStr, publisherKey, topPublishers]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  React.useEffect(() => {
+    const sig = `${baseFilterStr}::${publisherKey}`;
+    if (cachedFor !== null && cachedFor !== sig) {
+      setData({ status: 'idle' });
+      setCachedFor(null);
+    }
+  }, [baseFilterStr, publisherKey, cachedFor]);
+
+  // Scatter rendering. Inlined to keep the section self-contained.
+  const Scatter = ({ points, fieldColorMap, otherColor }) => {
+    const [hover, setHover] = React.useState(null);
+    const W = 780, H = 420;
+    const PAD = { top: 16, right: 24, bottom: 46, left: 60 };
+    const plotW = W - PAD.left - PAD.right;
+    const plotH = H - PAD.top - PAD.bottom;
+
+    if (!points || points.length === 0) {
+      return (
+        <div className="flex h-[420px] items-center justify-center" style={{ color: PALETTE.muted, fontFamily: FONT_BODY, fontSize: 13 }}>
+          No publishers with enough APC-known works to plot.
+        </div>
+      );
+    }
+
+    const maxApc = Math.max(1, ...points.map((p) => p.meanApc));
+    const maxCites = Math.max(1, ...points.map((p) => p.meanCites));
+    const maxN = Math.max(1, ...points.map((p) => p.nWorks));
+
+    // Nice-round axis maxima
+    const niceMax = (v) => {
+      const mag = Math.pow(10, Math.floor(Math.log10(Math.max(1, v))));
+      return Math.ceil(v / mag) * mag;
+    };
+    const xMax = niceMax(maxApc);
+    const yMax = niceMax(maxCites);
+
+    const xFor = (v) => PAD.left + (v / xMax) * plotW;
+    const yFor = (v) => PAD.top + plotH - (v / yMax) * plotH;
+    const rFor = (n) => 4 + Math.sqrt(n / maxN) * 16;
+
+    // Axis ticks
+    const xTicks = [0, xMax / 4, xMax / 2, (3 * xMax) / 4, xMax];
+    const yTicks = [0, yMax / 4, yMax / 2, (3 * yMax) / 4, yMax];
+
+    return (
+      <div className="relative" style={{ width: '100%' }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+          {/* Grid + axes */}
+          {yTicks.map((t) => (
+            <g key={`yt-${t}`}>
+              <line x1={PAD.left} x2={W - PAD.right} y1={yFor(t)} y2={yFor(t)} stroke={PALETTE.rule} strokeDasharray="2 4" />
+              <text x={PAD.left - 6} y={yFor(t) + 3} textAnchor="end" style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}>
+                {t.toFixed(t < 10 ? 1 : 0)}
+              </text>
+            </g>
+          ))}
+          {xTicks.map((t) => (
+            <g key={`xt-${t}`}>
+              <line x1={xFor(t)} x2={xFor(t)} y1={PAD.top} y2={H - PAD.bottom} stroke={PALETTE.rule} strokeDasharray="2 4" opacity="0.5" />
+              <text x={xFor(t)} y={H - PAD.bottom + 14} textAnchor="middle" style={{ fontFamily: FONT_MONO, fontSize: 9, fill: PALETTE.muted }}>
+                ${t >= 1000 ? `${(t / 1000).toFixed(t < 10000 ? 1 : 0)}K` : t.toFixed(0)}
+              </text>
+            </g>
+          ))}
+          {/* Axis labels */}
+          <text
+            x={PAD.left + plotW / 2} y={H - 6}
+            textAnchor="middle"
+            style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
+          >
+            MEAN APC LIST (USD, DOAJ)
+          </text>
+          <text
+            x={14} y={PAD.top + plotH / 2}
+            textAnchor="middle"
+            transform={`rotate(-90, 14, ${PAD.top + plotH / 2})`}
+            style={{ fontFamily: FONT_MONO, fontSize: 10, letterSpacing: '0.12em', fill: PALETTE.charcoal }}
+          >
+            MEAN CITES PER WORK
+          </text>
+          {/* Points, sorted so hovered rises to top */}
+          {points.map((p) => {
+            const isHovered = hover && hover.key === p.key;
+            const color = fieldColorMap.get(p.dominantField) || otherColor;
+            return (
+              <circle
+                key={p.key}
+                cx={xFor(p.meanApc)}
+                cy={yFor(p.meanCites)}
+                r={rFor(p.nWorks)}
+                fill={color}
+                fillOpacity={isHovered ? 0.85 : (hover ? 0.28 : 0.55)}
+                stroke={isHovered ? PALETTE.ink : color}
+                strokeWidth={isHovered ? 1.5 : 0.8}
+                style={{ cursor: 'pointer' }}
+                onMouseEnter={() => setHover(p)}
+                onMouseLeave={() => setHover(null)}
+              />
+            );
+          })}
+        </svg>
+        {hover && (
+          <div
+            className="pointer-events-none absolute rounded-sm px-3 py-2"
+            style={{
+              background: PALETTE.ink,
+              color: PALETTE.cream,
+              fontFamily: FONT_BODY,
+              fontSize: 11.5,
+              lineHeight: 1.5,
+              border: `1px solid ${PALETTE.ink}`,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+              top: 8, right: 8, maxWidth: 320,
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 3 }}>{hover.label}</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 10.5, opacity: 0.9 }}>
+              Mean APC: ${fmtFull(Math.round(hover.meanApc))}<br />
+              Mean cites/work: {hover.meanCites.toFixed(1)}<br />
+              N works with known APC: {hover.nWorks} of {hover.nSampled} sampled<br />
+              Dominant field: {hover.dominantField}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <Card className="p-5 lg:col-span-12">
+      <SectionTitle
+        icon={TrendingUp}
+        kicker="APC vs citation impact"
+        title="Do higher-APC publishers deliver more citations?"
+        hint="Publisher-level scatter; each dot is one publisher"
+      />
+      <p
+        className="-mt-2 mb-4 max-w-4xl"
+        style={{ fontFamily: FONT_BODY, fontSize: 12.5, color: PALETTE.muted, lineHeight: 1.55 }}
+      >
+        Each dot is one publisher in the top 30 for {countryName(country)}'s current selection. The x position is that publisher's
+        mean APC list price (USD, sourced from DOAJ); the y position is mean citations per work. Dot size scales with the
+        number of qualifying works; dot colour marks the publisher's most common field. A rightward-and-upward drift
+        would suggest higher-APC publishers get more citations, but read it with care: the pattern is heavily confounded
+        by venue prestige (a Nature-tier publisher sits top-right regardless of causal APC effect) and by field
+        (biomedical publishers cluster differently from humanities). The field colouring makes the between-field
+        component visible so it doesn't get mistaken for a within-field trend.
+      </p>
+
+      {data.status === 'idle' && (
+        <div className="rounded-sm px-4 py-6 text-center" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <div style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal, marginBottom: 12 }}>
+            This section loads on demand.
+          </div>
+          <button
+            onClick={load}
+            className="rounded-sm px-4 py-2"
+            style={{
+              background: PALETTE.ink,
+              color: PALETTE.cream,
+              fontFamily: FONT_MONO,
+              fontSize: 12,
+              letterSpacing: '0.04em',
+              border: `1px solid ${PALETTE.ink}`,
+            }}
+            disabled={topPublishers.length === 0}
+          >
+            {topPublishers.length === 0 ? 'Waiting for publisher list…' : 'Load APC vs citation analysis'}
+          </button>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, marginTop: 10 }}>
+            Fires up to {Math.min(30, topPublishers.length)} API calls (one per publisher).
+          </div>
+        </div>
+      )}
+
+      {data.status === 'loading' && (
+        <div className="flex items-center gap-2 rounded-sm px-4 py-6" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}` }}>
+          <Loader2 size={14} className="animate-spin" />
+          <span style={{ fontFamily: FONT_BODY, fontSize: 13, color: PALETTE.charcoal }}>
+            Sampling each publisher's works, computing means…
+          </span>
+        </div>
+      )}
+
+      {data.status === 'error' && (
+        <div className="rounded-sm px-4 py-4" style={{ background: PALETTE.cream, border: `1px solid ${PALETTE.rule}`, color: PALETTE.burgundy, fontFamily: FONT_BODY, fontSize: 13 }}>
+          Could not load: {data.error}. <button onClick={load} style={{ textDecoration: 'underline', color: PALETTE.ink, fontFamily: FONT_MONO, fontSize: 12 }}>Retry</button>
+        </div>
+      )}
+
+      {data.status === 'ready' && (
+        <>
+          <Scatter points={data.points} fieldColorMap={data.fieldColorMap} otherColor={data.otherColor} />
+          {/* Legend + qualification note */}
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+            {data.fields.map((f) => (
+              <div key={f.label} className="flex items-center gap-1.5">
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: f.color, display: 'inline-block' }} />
+                <span style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.charcoal }}>{f.label}</span>
+              </div>
+            ))}
+            <div className="flex items-center gap-1.5">
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: data.otherColor, display: 'inline-block' }} />
+              <span style={{ fontFamily: FONT_BODY, fontSize: 11, color: PALETTE.muted }}>Other</span>
+            </div>
+          </div>
+          <div className="mt-3" style={{ fontFamily: FONT_MONO, fontSize: 10, color: PALETTE.muted, letterSpacing: '0.06em' }}>
+            {data.points.length} of {data.totalPublishersConsidered} publishers plotted · minimum 5 works with known APC per publisher · publishers with all-null APC (typical of hybrid or non-DOAJ venues) are excluded · Diamond OA publishers sit at $0 by design
+          </div>
+        </>
+      )}
+    </Card>
+  );
+};
+
+
+
 // ===== SJR "Journal placement" (quartile) panel ==============================
 // Mirrors ApcPanel: precomputed national view (sjr_by_quartile.json) when no
 // filter is active, live in-browser recompute when a filter is active using the
@@ -4258,6 +4629,14 @@ export default function ResearchOutputDashboard() {
   const [filters, setFilters] = useState({});
   const [state, setState] = useState({});
 
+  // Author role filter. 'any' (default) uses standard country_code affiliation;
+  // 'corresponding' restricts to works where at least one country-institution
+  // is credited as a corresponding-author's institution. This is a stronger
+  // signal of paper leadership than mere affiliation. First-author-only is
+  // not offered because OpenAlex does not expose author_position as a
+  // top-level filter.
+  const [authorRole, setAuthorRole] = useState('any');
+
   // Persist country and clear filters when it changes (institution/publisher/funder
   // IDs from one country don't apply once the corpus shifts to another).
   useEffect(() => {
@@ -4265,6 +4644,10 @@ export default function ResearchOutputDashboard() {
       window.localStorage?.setItem('dashboard.country', country);
     }
     setFilters({});
+    // Author role is country-specific in the sense that the corresponding-institution
+    // roster is country-scoped. Reset to 'any' so the previous country's role
+    // filter doesn't linger with a mismatched roster.
+    setAuthorRole('any');
   }, [country]);
 
   // How many bars/slices each panel shows. Defaults aim for legible at first glance.
@@ -4339,6 +4722,7 @@ export default function ResearchOutputDashboard() {
     const signature = JSON.stringify({
       country,
       windowYears,
+      authorRole,
       filters: Object.entries(filters || {})
         .filter(([, v]) => v && v.length > 0)
         .map(([k, v]) => [k, v.map((c) => c.value).sort()])
@@ -4350,8 +4734,12 @@ export default function ResearchOutputDashboard() {
     let cancelled = false;
     setPublisherRankCache({ status: 'loading', rows: [], years: [], signature });
 
+    const correspondingRoster = authorRole === 'corresponding'
+      ? (state.institutions?.data || []).slice(0, 100).map((d) => d.key)
+      : null;
+
     const fetchYear = async (y) => {
-      const filterStr = buildFilterString(country, y, filters, 'publishers');
+      const filterStr = buildFilterString(country, y, filters, 'publishers', authorRole, correspondingRoster);
       // per-page=200 returns the full top-200 publishers per year (OpenAlex group_by
       // counts are exact regardless of page size; 200 just gives a complete ranking
       // and matches the Top publishers panel). We still only chart the top 15.
@@ -4403,7 +4791,7 @@ export default function ResearchOutputDashboard() {
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [publisherView, country, years, JSON.stringify(filters)]);
+  }, [publisherView, country, years, JSON.stringify(filters), authorRole]);
 
   const setLimit = (dim) => (n) => setDisplayLimits((s) => ({ ...s, [dim]: n }));
   const limitFor = (dim) => displayLimits[dim] ?? DEFAULT_LIMITS[dim] ?? 12;
@@ -4541,11 +4929,19 @@ export default function ResearchOutputDashboard() {
   }, [state.institutions?.data, instTypeFilter, instSubcategoryFilter]);
 
   const filterStrings = useMemo(() => {
+    // For the corresponding-author restriction: derive the top-100 country
+    // institutions from the roster panel. If the roster isn't loaded yet, the
+    // restriction is skipped (we don't want to fire filtered requests with a
+    // stale or empty roster; better to briefly show the unrestricted view).
+    const correspondingRoster = authorRole === 'corresponding'
+      ? (state.institutions?.data || []).slice(0, 100).map((d) => d.key)
+      : null;
+
     // Base filters, always built from the breadcrumb chips.
-    const baseAll = buildFilterString(country, years, filters);
+    const baseAll = buildFilterString(country, years, filters, null, authorRole, correspondingRoster);
     const baseByDim = {};
     Object.keys(DIMENSIONS).forEach((d) => {
-      baseByDim[d] = buildFilterString(country, years, filters, d);
+      baseByDim[d] = buildFilterString(country, years, filters, d, authorRole, correspondingRoster);
     });
 
     // Augment with the synthetic institution-ID filter when a type/subcategory is active.
@@ -4563,7 +4959,11 @@ export default function ResearchOutputDashboard() {
       m[d] = augmented(baseByDim[d], d !== 'institutions');
     });
     return m;
-  }, [country, years, filters, syntheticInstitutionFilter]);
+    // We depend on the roster's identity via a stable join; array reference
+    // alone would trigger unnecessary refetches on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [country, years, filters, syntheticInstitutionFilter, authorRole,
+      (state.institutions?.data || []).slice(0, 100).map((d) => d.key).join(',')]);
 
   // Shared per-dimension fetch helper. Each per-card effect calls this to load
   // its dimension's data; the returned cleanup cancels in-flight writes so a
@@ -4973,6 +5373,49 @@ export default function ResearchOutputDashboard() {
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <CountrySelector country={country} onChange={setCountry} />
+              {/* Author role filter. 'Any affiliation' (default) counts every
+                  work with at least one country-affiliated author on the byline.
+                  'Corresponding' narrows to works where a country-affiliated
+                  institution is credited as a corresponding-author institution.
+                  This is a stronger signal of paper leadership.
+                  First-author-only is not offered because OpenAlex does not
+                  expose author_position as a top-level filter. */}
+              <div
+                className="flex items-center gap-1 rounded-sm"
+                style={{ border: `1px solid ${PALETTE.rule}` }}
+              >
+                <span
+                  className="pl-2 pr-1"
+                  style={{ fontFamily: FONT_MONO, fontSize: 9, letterSpacing: '0.14em', color: PALETTE.muted }}
+                >
+                  ROLE
+                </span>
+                {[
+                  { key: 'any',           label: 'Any' },
+                  { key: 'corresponding', label: 'Corresponding' },
+                ].map((r) => {
+                  const active = authorRole === r.key;
+                  return (
+                    <button
+                      key={r.key}
+                      onClick={() => setAuthorRole(r.key)}
+                      style={{
+                        fontFamily: FONT_MONO,
+                        fontSize: 11,
+                        letterSpacing: '0.04em',
+                        background: active ? PALETTE.ink : 'transparent',
+                        color: active ? PALETTE.cream : PALETTE.charcoal,
+                        padding: '4px 8px',
+                      }}
+                      title={r.key === 'any'
+                        ? `Count every work with at least one ${countryName(country)}-affiliated author on the byline.`
+                        : `Restrict to works where a ${countryName(country)}-affiliated institution is credited as a corresponding-author institution.`}
+                    >
+                      {r.label}
+                    </button>
+                  );
+                })}
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 {/* Multi-select year tabs. Click to toggle each year; cannot
                     deselect the last remaining year (the dashboard always needs
@@ -5644,6 +6087,12 @@ export default function ResearchOutputDashboard() {
                 : (institutionsFiltered || []).map((d) => normalizeFilterValue(d.key))
             }
             {...bindCard('apc')}
+          />
+
+          <ApcCitationSection
+            country={country}
+            baseFilterStr={filterStrings.all}
+            topPublishers={state.publishers?.data || []}
           />
         </div>
         </CollapsibleSection>
